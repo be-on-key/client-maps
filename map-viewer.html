@@ -6,6 +6,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
 <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<!-- three.js is lazy-loaded (dynamic import) only when a 3D model is actually used, via this
+     import map — GLTFLoader's addon module resolves the bare "three" specifier through it. -->
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+} }
+</script>
 <script>/*__CLIENT_CONFIG__*/</script>
 <style>
   html,body{margin:0;height:100%;font-family:'Segoe UI',system-ui,sans-serif;background:#14161a;}
@@ -120,6 +128,13 @@
     </div>
     <div id="custom-poi-status" style="font-size:11px;color:#8b919c;max-height:140px;overflow-y:auto"></div>
     <div id="custom-poi-cats"></div>
+  </div>
+
+  <div class="section">
+    <div class="title">Custom 3D models</div>
+    <div class="row"><input type="file" id="model-file" accept=".glb,.gltf" style="flex:1;font-size:11px"></div>
+    <div id="model-status" style="font-size:11px;color:#8b919c"></div>
+    <div id="model-list"></div>
   </div>
 
   <div class="section">
@@ -352,6 +367,10 @@ map.on('load', () => {
   map.setLayoutProperty('boundary-line', 'visibility', $('t-outline').checked ? 'visible' : 'none');
   applySolid();
   if (lastRing) applyBoundary(lastRing, false); // search completed pre-load
+  // Materialise any models baked into an exported/viewer-mode config — done here (not at parse
+  // time, where CFG.models was stashed) because custom layers need the style already loaded
+  for (const md of cfgModels) addPlacedModel({ ...md });
+  cfgModels = [];
 });
 
 // ---------- POI filtering ----------
@@ -606,6 +625,188 @@ $('btn-custom-poi-clear').addEventListener('click', () => {
   toast('Custom points cleared');
 });
 
+// ---------- Custom 3D models (glTF/glb) ----------
+// MapLibre has no native model-layer support (unlike Mapbox GL JS) — this hand-rolls a MapLibre
+// 'custom' layer per placed model, each hosting its own tiny three.js scene. three.js is loaded
+// lazily (dynamic import, via the importmap in <head>) only once a model is actually used, so a
+// map with no custom models never pays for it.
+const MODEL_MAX_BYTES = 20 * 1024 * 1024; // raw glb/gltf; ~27MB once base64-embedded in the export
+let THREE = null, GLTFLoader = null, threeLoadPromise = null;
+function loadThree(){
+  if (!threeLoadPromise) threeLoadPromise = (async () => {
+    THREE = await import('three');
+    ({ GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js'));
+  })();
+  return threeLoadPromise;
+}
+let placedModels = []; // {id, name, lng, lat, scale, rotationDeg, onTerrain, dataUrl, layer, marker}
+let modelSeq = 0;
+let cfgModels = []; // stashed from CFG at boot, materialised once the style is ready (see 'load')
+
+function base64ToArrayBuffer(dataUrl){
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+function fileToDataUrl(file){
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+// Sun direction from applyTimeOfDay's az/polar (degrees, polar measured from zenith), converted
+// into each model's pre-rotation local Y-up space — the light lives in three.js scene-local space
+// (all map alignment happens in the projection matrix, not on the objects), while az/polar are
+// expressed in map/world space (map render space is Z-up: MercatorCoordinate.z is altitude/up).
+// The fixed rotationX(90°) applied at render time maps local (x,y,z) -> world (x,-z,y), so the
+// inverse — world (X,Y,Z) -> local (X,Z,-Y) — is what a light direction needs to be expressed in.
+function updateModelLighting(azDeg, polarDeg, color, intensity){
+  if (!THREE || !placedModels.length) return;
+  const az = azDeg * Math.PI / 180, polar = polarDeg * Math.PI / 180;
+  const wx = Math.sin(polar) * Math.sin(az), wy = Math.sin(polar) * Math.cos(az), wz = Math.cos(polar);
+  for (const m of placedModels) {
+    const l = m.layer;
+    if (!l || !l.dirLight) continue;
+    l.dirLight.position.set(wx, wz, -wy);
+    l.dirLight.color.set(color);
+    l.dirLight.intensity = intensity * 2.2; // three.js/MapLibre lighting aren't calibrated 1:1
+  }
+  map.triggerRepaint();
+}
+function renderModelList(){
+  const box = $('model-list');
+  box.innerHTML = '';
+  for (const model of placedModels) {
+    const row = document.createElement('div');
+    row.style.cssText = 'border-top:1px solid #2e333b;margin-top:6px;padding-top:6px';
+    row.innerHTML = `
+      <div class="row"><label style="flex:1;font-size:11px;color:#cfd3da">${model.name}</label>
+        <button class="btn model-remove">✕</button></div>
+      <div class="row"><label>Scale</label><input type="range" class="model-scale" min="0.1" max="5" step="0.1" value="${model.scale}"><span class="val model-scale-v">${model.scale.toFixed(1)}</span></div>
+      <div class="row"><label>Rotation</label><input type="range" class="model-rotation" min="0" max="360" step="1" value="${model.rotationDeg}"><span class="val model-rotation-v">${model.rotationDeg}°</span></div>
+      <div class="row"><label><input type="checkbox" class="model-terrain" ${model.onTerrain ? 'checked' : ''}> Sit on terrain</label></div>`;
+    row.querySelector('.model-remove').addEventListener('click', () => removePlacedModel(model.id));
+    row.querySelector('.model-scale').addEventListener('input', e => {
+      model.scale = parseFloat(e.target.value);
+      row.querySelector('.model-scale-v').textContent = model.scale.toFixed(1);
+      map.triggerRepaint();
+    });
+    row.querySelector('.model-rotation').addEventListener('input', e => {
+      model.rotationDeg = parseFloat(e.target.value);
+      row.querySelector('.model-rotation-v').textContent = model.rotationDeg + '°';
+      map.triggerRepaint();
+    });
+    row.querySelector('.model-terrain').addEventListener('change', e => {
+      model.onTerrain = e.target.checked; map.triggerRepaint();
+    });
+    box.appendChild(row);
+  }
+}
+function removePlacedModel(id){
+  const i = placedModels.findIndex(m => m.id === id);
+  if (i < 0) return;
+  const model = placedModels[i];
+  if (model.marker) model.marker.remove();
+  if (map.getLayer(model.id)) map.removeLayer(model.id);
+  placedModels.splice(i, 1);
+  renderModelList();
+}
+async function createModelLayerFor(model){
+  await loadThree();
+  const layer = {
+    id: model.id,
+    type: 'custom',
+    renderingMode: '3d',
+    onAdd(mapInst, gl){
+      this.scene = new THREE.Scene();
+      this.camera = new THREE.Camera();
+      this.dirLight = new THREE.DirectionalLight(0xffffff, 1);
+      this.scene.add(this.dirLight);
+      this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+      this.renderer = new THREE.WebGLRenderer({ canvas: mapInst.getCanvas(), context: gl, antialias: true });
+      this.renderer.autoClear = false;
+      const loader = new GLTFLoader();
+      let buf;
+      try { buf = base64ToArrayBuffer(model.dataUrl); }
+      catch (err) { toast(`"${model.name}" failed to decode: ${err.message}`, 5000); return; }
+      loader.parse(buf, '', gltf => {
+        this.model3d = gltf.scene;
+        this.scene.add(this.model3d);
+        map.triggerRepaint();
+      }, err => toast(`"${model.name}" failed to load: ${(err && err.message) || err}`, 5000));
+    },
+    render(gl, matrix){
+      if (!this.model3d) return;
+      const alt = (model.onTerrain && ready()) ? (map.queryTerrainElevation([model.lng, model.lat]) || 0) : 0;
+      const origin = maplibregl.MercatorCoordinate.fromLngLat([model.lng, model.lat], alt);
+      const s = origin.meterInMercatorCoordinateUnits() * model.scale;
+      // Standard MapLibre/Mapbox + three.js custom-layer recipe: fixed 90° X-rotation converts
+      // glTF's Y-up convention to this world space's Z-up (mercator altitude = Z); the Y-scale
+      // flip corrects mercator's south-positive Y vs three.js's north/up-positive Y. rotationZ
+      // (user-editable) is applied first (innermost), so it yaws the model in its own upright
+      // frame rather than tipping it sideways.
+      const rotationX = new THREE.Matrix4().makeRotationX(Math.PI / 2);
+      const rotationZ = new THREE.Matrix4().makeRotationZ(model.rotationDeg * Math.PI / 180);
+      const l = new THREE.Matrix4()
+        .makeTranslation(origin.x, origin.y, origin.z)
+        .scale(new THREE.Vector3(s, -s, s))
+        .multiply(rotationZ)
+        .multiply(rotationX);
+      const m = new THREE.Matrix4().fromArray(matrix).multiply(l);
+      this.camera.projectionMatrix = m;
+      this.renderer.resetState();
+      this.renderer.render(this.scene, this.camera);
+    }
+  };
+  model.layer = layer;
+  map.addLayer(layer);
+  // Draggable reposition marker — editor only, never in an exported/viewer-mode file
+  if ($('panel').style.display !== 'none') {
+    const el = document.createElement('div');
+    el.className = 'vert';
+    el.title = model.name;
+    const marker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([model.lng, model.lat]).addTo(map);
+    marker.on('drag', () => { const ll = marker.getLngLat(); model.lng = ll.lng; model.lat = ll.lat; map.triggerRepaint(); });
+    model.marker = marker;
+  }
+}
+function addPlacedModel(draft){
+  const model = { id: 'model-' + (modelSeq++), scale: 1, rotationDeg: 0, onTerrain: true, ...draft };
+  placedModels.push(model);
+  renderModelList();
+  if (ready()) createModelLayerFor(model);
+  if (lastRing && !insideBoundary(model.lng, model.lat))
+    toast(`"${model.name}" is outside your boundary — it may be clipped from the exported view`, 5000);
+}
+// Click-to-place: same one-shot-armed-click idiom as the custom POI manual-placement fallback
+let pendingModelPlacement = null;
+map.on('click', e => {
+  if (!pendingModelPlacement || drawMode) return;
+  const draft = pendingModelPlacement;
+  pendingModelPlacement = null;
+  map.getCanvas().style.cursor = drawMode ? 'crosshair' : '';
+  addPlacedModel({ ...draft, lng: e.lngLat.lng, lat: e.lngLat.lat });
+});
+$('model-file').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (!/\.(glb|gltf)$/i.test(file.name)) { toast('Choose a .glb or .gltf file'); e.target.value = ''; return; }
+  if (file.size > MODEL_MAX_BYTES) {
+    toast(`"${file.name}" is too large (max 20MB) — try compressing it first, e.g. with gltf-transform`, 6000);
+    e.target.value = ''; return;
+  }
+  statusLine('model-status', 'Reading file…');
+  const dataUrl = await fileToDataUrl(file);
+  statusLine('model-status', 'Click the map to place it');
+  pendingModelPlacement = { name: file.name, dataUrl };
+  map.getCanvas().style.cursor = 'crosshair';
+  e.target.value = ''; // allow re-selecting the same filename later
+});
+
 // ---------- Label fonts (stacks verified live on fonts.openmaptiles.org) ----------
 const FONTS = [
   'Klokantech Noto Sans Regular','Klokantech Noto Sans Bold','Klokantech Noto Sans Italic',
@@ -676,6 +877,7 @@ function applyTimeOfDay(h){
   map.setPaintProperty('night-dim', 'fill-opacity', k.dim);
   curFog = k.fog; curDim = k.dim;
   updateMaskStyle();
+  updateModelLighting(az, polar, k.lc, k.int);
 }
 // Fog must contrast with the ground (light ground → darken outside, and vice versa), but the
 // contrast strength follows time of day — full-dark fog at noon read as permanent night
@@ -1566,7 +1768,7 @@ setBirds(true);
 // ---------- Export: bake the current setup into a standalone client map ----------
 function serializeConfig(){
   return {
-    v: 4,
+    v: 5,
     camera: { center: [map.getCenter().lng, map.getCenter().lat],
               zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing() },
     ring: lastRing,
@@ -1588,6 +1790,11 @@ function serializeConfig(){
                   cats: { ...customCatState },
                   colors: Object.fromEntries(Object.entries(customPoiCats).map(([k, v]) => [k, v.color])),
                   features: customPoiFeatures.map(f => ({ name: f.name, category: f.category, lng: f.lng, lat: f.lat })) },
+    // dataUrl is the glb/gltf bytes as base64 — embedded directly so the export stays one
+    // self-contained file (no separate asset host), at the cost of file size
+    models: placedModels.map(m => ({ name: m.name, lng: m.lng, lat: m.lat,
+                                      scale: m.scale, rotationDeg: m.rotationDeg, onTerrain: m.onTerrain,
+                                      dataUrl: m.dataUrl })),
   };
 }
 $('btn-export').addEventListener('click', async () => {
@@ -1602,7 +1809,8 @@ $('btn-export').addEventListener('click', async () => {
     a.download = name + '.html';
     a.click();
     URL.revokeObjectURL(a.href);
-    toast('Exported — host the file anywhere, link it or iframe it', 4500);
+    const mb = (html.length / (1024 * 1024)).toFixed(1);
+    toast(placedModels.length ? `Exported (${mb}MB, includes ${placedModels.length} embedded model${placedModels.length===1?'':'s'}) — host anywhere, link it or iframe it` : 'Exported — host the file anywhere, link it or iframe it', 5500);
   } catch (err) { toast('Export failed: ' + err.message); }
 });
 
@@ -1640,6 +1848,9 @@ if (CFG) {
     customPoiFeatures = CFG.customPois.features;
     renderCustomPoiCatRows();
   }
+  // v1-v4 exports predate 3D models — CFG.models is absent, cfgModels stays empty and the
+  // 'load' handler's materialisation loop is a no-op
+  cfgModels = CFG.models || [];
   lastRing = CFG.ring;
   lastBounds = ringBBox(CFG.ring);
   map.jumpTo({ center: CFG.camera.center, zoom: CFG.camera.zoom,
