@@ -30,7 +30,6 @@
   .btn{background:#262b33;border:1px solid #3a404a;color:#dfe2e8;border-radius:6px;padding:5px 9px;font-size:12px;cursor:pointer;}
   .btn:hover{background:#2f3540;}
   .btn.active{background:#2b5a9e;border-color:#4d8fe8;color:#fff;}
-  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none;}
   .val{width:28px;text-align:right;color:#8b919c;flex:none;}
   #toast{
     position:absolute;bottom:18px;left:50%;transform:translateX(-50%);z-index:20;
@@ -231,14 +230,19 @@ const style = {
       paint: { 'line-color': '#4d8fe8', 'line-width': 2, 'line-dasharray': [2,1.5] } },
     { id: 'handle-lines', type: 'line', source: 'hlines',
       paint: { 'line-color': '#4d8fe8', 'line-width': 1.2, 'line-opacity': 0.9 } },
-    { id: 'poi-dots', type: 'circle', source: 'omt', 'source-layer': 'poi', minzoom: 13,
+    { id: 'poi-dots', type: 'circle', source: 'omt', 'source-layer': 'poi', minzoom: 13, maxzoom: 14,
       paint: { 'circle-radius': ['interpolate',['linear'],['zoom'], 13,2.5, 17,5.5],
                'circle-pitch-scale': 'map',
                'circle-color': '#999', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.2 } },
+    // Pill: a single SDF rounded-rect base image (added at runtime, see poi-pill below) recoloured
+    // per-feature via icon-color (SDF-only paint property) and auto-sized to the label text via
+    // icon-text-fit — no per-category image variants needed.
     { id: 'poi-labels', type: 'symbol', source: 'omt', 'source-layer': 'poi', minzoom: 14,
       layout: { 'text-field': ['get','name'], 'text-font': ['Klokantech Noto Sans Regular'],
-                'text-size': 11, 'text-offset': [0, 0.9], 'text-anchor': 'top', 'text-optional': true },
-      paint: { 'text-color': '#2b2f36', 'text-halo-color': 'rgba(255,255,255,.9)', 'text-halo-width': 1.3 } },
+                'text-size': 11, 'text-anchor': 'center', 'text-optional': true,
+                'icon-image': 'poi-pill', 'icon-text-fit': 'both', 'icon-text-fit-padding': [6,10,6,10],
+                'icon-allow-overlap': false },
+      paint: { 'text-color': '#ffffff', 'icon-color': ['literal', '#999'] } },
     { id: 'road-labels', type: 'symbol', source: 'omt', 'source-layer': 'transportation_name', minzoom: 14,
       layout: { 'symbol-placement': 'line', 'text-field': ['get','name'],
                 'text-font': ['Klokantech Noto Sans Regular'], 'text-size': 10.5 },
@@ -272,8 +276,28 @@ map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }));
 let styleReady = false;
 const ready = () => styleReady;
 
+// SDF pill base image for poi-labels' icon-image: a rounded-rect, white on transparent, drawn once
+// on an offscreen canvas. SDF lets icon-color recolour it per-feature at render time (icon-text-fit
+// then stretches it to each label's rendered text bbox) — one shared image, no per-category variants.
+function addPoiPillImage(){
+  const w = 64, h = 40, r = 16, pr = 3;
+  const c = document.createElement('canvas');
+  c.width = w * pr; c.height = h * pr;
+  const ctx = c.getContext('2d');
+  ctx.scale(pr, pr);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(r, 0); ctx.arcTo(w, 0, w, h, r); ctx.arcTo(w, h, 0, h, r);
+  ctx.arcTo(0, h, 0, 0, r); ctx.arcTo(0, 0, w, 0, r);
+  ctx.closePath(); ctx.fill();
+  if (map.hasImage('poi-pill')) map.removeImage('poi-pill');
+  map.addImage('poi-pill', { width: c.width, height: c.height, data: ctx.getImageData(0, 0, c.width, c.height).data },
+    { sdf: true, pixelRatio: pr });
+}
+
 map.on('load', () => {
   styleReady = true;
+  addPoiPillImage();
   // Re-sync everything the panel could have changed while the style was still loading
   applyTimeOfDay(parseFloat($('t-time').value));
   applyPoiFilter();
@@ -311,15 +335,21 @@ function applyPoiFilter(){
   // MapLibre rejects it (error event, not throw). Rank cap + collision detection thin labels.
   map.setFilter('poi-labels', f);
   map.setPaintProperty('poi-dots', 'circle-color', poiColorExpr());
+  map.setPaintProperty('poi-labels', 'icon-color', poiColorExpr());
 }
 const catBox = $('poi-cats');
 for (const [name, {color}] of Object.entries(POI_CATS)) {
   const row = document.createElement('div');
   row.className = 'row';
-  row.innerHTML = `<label style="display:flex;align-items:center;gap:6px">
-    <input type="checkbox" checked><span class="dot" style="background:${color}"></span>${name}</label>`;
-  row.querySelector('input').addEventListener('change', e => {
+  row.innerHTML = `<label style="display:flex;align-items:center;gap:6px;flex:1">
+    <input type="checkbox" checked>${name}</label>
+    <input type="color" value="${color}">`;
+  row.querySelector('input[type=checkbox]').addEventListener('change', e => {
     catState[name] = e.target.checked; applyPoiFilter();
+  });
+  row.querySelector('input[type=color]').addEventListener('input', e => {
+    POI_CATS[name].color = e.target.value;
+    if (ready()) applyPoiFilter();
   });
   catBox.appendChild(row);
 }
@@ -430,16 +460,19 @@ $('t-time').addEventListener('input', e => {
   applyTimeOfDay(h);
 });
 
-// POI click popup
-map.on('click', 'poi-dots', e => {
+// POI click popup — bound to both the low-zoom dot and the pill/label layer that replaces it
+function poiPopup(e){
   const f = e.features[0];
   new maplibregl.Popup({ closeButton: false })
     .setLngLat(e.lngLat)
     .setHTML(`<b>${f.properties.name || '(unnamed)'}</b><br><span style="color:#8b919c">${f.properties.class}${f.properties.subclass && f.properties.subclass !== f.properties.class ? ' · ' + f.properties.subclass : ''}</span>`)
     .addTo(map);
-});
-map.on('mouseenter', 'poi-dots', () => { if (!drawMode) map.getCanvas().style.cursor = 'pointer'; });
-map.on('mouseleave', 'poi-dots', () => { map.getCanvas().style.cursor = drawMode ? 'crosshair' : ''; });
+}
+for (const layer of ['poi-dots', 'poi-labels']) {
+  map.on('click', layer, poiPopup);
+  map.on('mouseenter', layer, () => { if (!drawMode) map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = drawMode ? 'crosshair' : ''; });
+}
 
 // ---------- Colours ----------
 const recolour = {
@@ -1278,7 +1311,7 @@ setBirds(true);
 // ---------- Export: bake the current setup into a standalone client map ----------
 function serializeConfig(){
   return {
-    v: 1,
+    v: 2,
     camera: { center: [map.getCenter().lng, map.getCenter().lat],
               zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing() },
     ring: lastRing,
@@ -1289,7 +1322,8 @@ function serializeConfig(){
     solid: $('t-solid').checked, taper: $('t-taper').checked,
     placeLabels: $('t-places').checked, orbit: $('t-orbit').checked,
     birds: $('t-birds').checked, outline: $('t-outline').checked,
-    pois: { master: $('t-pois').checked, cats: { ...catState } },
+    pois: { master: $('t-pois').checked, cats: { ...catState },
+            colors: Object.fromEntries(Object.entries(POI_CATS).map(([k, v]) => [k, v.color])) },
     fonts: Object.fromEntries(Object.keys(FONT_TARGETS).map(k => [k, $(k).value])),
   };
 }
@@ -1323,6 +1357,9 @@ if (CFG) {
   $('t-outline').checked = CFG.outline;
   $('t-pois').checked = CFG.pois.master;
   Object.assign(catState, CFG.pois.cats);
+  // v1 exports predate per-category colour editing — CFG.pois.colors is absent, POI_CATS keeps
+  // its built-in defaults, which is exactly v1's original (only) behaviour
+  if (CFG.pois.colors) for (const [k, c] of Object.entries(CFG.pois.colors)) POI_CATS[k].color = c;
   for (const [selId, font] of Object.entries(CFG.fonts)) $(selId).value = font;
   lastRing = CFG.ring;
   lastBounds = ringBBox(CFG.ring);
