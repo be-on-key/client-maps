@@ -1,0 +1,1345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3D Map Sandbox</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<script>/*__CLIENT_CONFIG__*/</script>
+<style>
+  html,body{margin:0;height:100%;font-family:'Segoe UI',system-ui,sans-serif;background:#14161a;}
+  #map{position:absolute;inset:0;}
+  #birds{position:absolute;inset:0;pointer-events:none;z-index:5;}
+  #panel{
+    position:absolute;top:12px;left:12px;z-index:10;width:250px;max-height:calc(100% - 24px);
+    overflow-y:auto;background:rgba(24,27,32,.94);border:1px solid #2e333b;border-radius:10px;
+    color:#cfd3da;font-size:12px;padding:12px;backdrop-filter:blur(6px);
+  }
+  #panel h3{margin:0 0 8px;font-size:13px;color:#fff;font-weight:600;}
+  .section{border-top:1px solid #2e333b;margin-top:10px;padding-top:8px;}
+  .section .title{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#8b919c;margin-bottom:6px;}
+  .row{display:flex;align-items:center;gap:6px;margin:4px 0;}
+  .row label{flex:1;}
+  input[type=text]{flex:1;background:#0f1114;border:1px solid #2e333b;color:#e8eaee;border-radius:6px;padding:5px 8px;font-size:12px;outline:none;min-width:0;}
+  input[type=text]:focus{border-color:#4d8fe8;}
+  select{flex:1;background:#0f1114;border:1px solid #2e333b;color:#e8eaee;border-radius:6px;padding:4px 6px;font-size:12px;outline:none;min-width:0;}
+  input[type=color]{width:34px;height:22px;border:1px solid #2e333b;border-radius:4px;background:none;padding:1px;cursor:pointer;}
+  input[type=range]{flex:1;accent-color:#4d8fe8;}
+  input[type=checkbox]{accent-color:#4d8fe8;}
+  .btn{background:#262b33;border:1px solid #3a404a;color:#dfe2e8;border-radius:6px;padding:5px 9px;font-size:12px;cursor:pointer;}
+  .btn:hover{background:#2f3540;}
+  .btn.active{background:#2b5a9e;border-color:#4d8fe8;color:#fff;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none;}
+  .val{width:28px;text-align:right;color:#8b919c;flex:none;}
+  #toast{
+    position:absolute;bottom:18px;left:50%;transform:translateX(-50%);z-index:20;
+    background:rgba(24,27,32,.95);border:1px solid #3a404a;color:#e8eaee;border-radius:8px;
+    padding:8px 14px;font-size:12px;display:none;pointer-events:none;
+  }
+  /* Illustrator-style path UI: square anchors, round direction-handle dots on thin lines */
+  .vert{width:10px;height:10px;background:#fff;border:2px solid #4d8fe8;cursor:grab;box-shadow:0 1px 4px rgba(0,0,0,.45);}
+  .vert:active{cursor:grabbing;}
+  .vert.sel{background:#4d8fe8;}
+  .vert.sharp{background:#ffd9a8;border-color:#e8804d;}
+  .vert-mid{width:9px;height:9px;border-radius:50%;background:rgba(255,255,255,.75);border:1.5px solid rgba(77,143,232,.85);cursor:copy;box-shadow:0 1px 3px rgba(0,0,0,.35);}
+  .hdl{width:9px;height:9px;border-radius:50%;background:#fff;border:2px solid #4d8fe8;cursor:grab;box-shadow:0 1px 3px rgba(0,0,0,.4);}
+  .maplibregl-popup-content{background:#1b1e24;color:#e8eaee;border-radius:8px;font-size:12px;padding:8px 12px;}
+  .maplibregl-popup-tip{border-top-color:#1b1e24 !important;border-bottom-color:#1b1e24 !important;}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<canvas id="birds"></canvas>
+<div id="toast"></div>
+
+<div id="panel">
+  <h3>3D Map Sandbox</h3>
+
+  <div class="row">
+    <input type="text" id="search" placeholder="Search suburb / address…">
+    <button class="btn" id="btn-go">Go</button>
+  </div>
+  <div class="row">
+    <button class="btn" id="btn-draw" style="flex:1">Draw boundary</button>
+    <button class="btn" id="btn-clear" style="flex:1">Clear</button>
+  </div>
+  <div class="row">
+    <label>Shape</label>
+    <button class="btn active" id="shape-rect" style="flex:1">▭ Rect</button>
+    <button class="btn" id="shape-ellipse" style="flex:1">◯ Ellipse</button>
+    <button class="btn" id="shape-free" style="flex:1">✎ Free</button>
+  </div>
+  <div class="row" id="recenter-row" style="display:none">
+    <button class="btn" id="btn-recenter" style="flex:1">⌖ Re-centre on boundary</button>
+  </div>
+  <div class="row"><label><input type="checkbox" id="t-outline" checked> Boundary outline</label></div>
+  <div class="row"><label><input type="checkbox" id="t-curve"> Curved corners (freeform)</label></div>
+  <div class="row"><label>Curve tension</label><input type="range" id="t-tension" min="0" max="1" step="0.05" value="0.5"><span class="val" id="t-tension-v">0.5</span></div>
+
+  <div class="section">
+    <div class="title">Colours</div>
+    <div class="row"><label>Buildings</label><input type="color" id="c-building" value="#d9d0c9"></div>
+    <div class="row"><label>Water</label><input type="color" id="c-water" value="#7fb8d4"></div>
+    <div class="row"><label>Green space</label><input type="color" id="c-green" value="#a8d5a2"></div>
+    <div class="row"><label>Terrain / ground</label><input type="color" id="c-ground" value="#f2efe9"></div>
+  </div>
+
+  <div class="section">
+    <div class="title">View</div>
+    <div class="row"><label>Time of day</label><input type="range" id="t-time" min="0" max="24" step="0.25" value="12"><span class="val" id="t-time-v">12:00</span></div>
+    <div class="row"><label><input type="checkbox" id="t-terrain"> Terrain elevation</label></div>
+    <div class="row"><label>Exaggeration</label><input type="range" id="t-exag" min="0.5" max="3" step="0.1" value="1.3"><span class="val" id="t-exag-v">1.3</span></div>
+    <div class="row"><label><input type="checkbox" id="t-solid" checked> Solid buildings</label></div>
+    <div class="row"><label><input type="checkbox" id="t-taper" checked> Taper heights to fog edge</label></div>
+    <div class="row"><label><input type="checkbox" id="t-places" checked> Place labels</label></div>
+    <div class="row"><label><input type="checkbox" id="t-orbit" checked> Auto-orbit when idle</label></div>
+    <div class="row"><label><input type="checkbox" id="t-birds" checked> Birds</label></div>
+  </div>
+
+  <div class="section">
+    <div class="title">Label fonts</div>
+    <div class="row"><label style="flex:0 0 48px">POIs</label><select id="f-poi"></select></div>
+    <div class="row"><label style="flex:0 0 48px">Places</label><select id="f-place"></select></div>
+    <div class="row"><label style="flex:0 0 48px">Roads</label><select id="f-road"></select></div>
+  </div>
+
+  <div class="section">
+    <div class="title"><label style="text-transform:none;font-size:12px;color:#cfd3da"><input type="checkbox" id="t-pois" checked> <b style="color:#fff">Points of interest</b></label></div>
+    <div id="poi-cats"></div>
+  </div>
+
+  <div class="section">
+    <div class="title">Export</div>
+    <div class="row"><input type="text" id="exp-name" placeholder="Client / project name"></div>
+    <button class="btn" id="btn-export" style="width:100%;text-align:center;">Export client map (HTML)</button>
+  </div>
+</div>
+
+<script>
+// Surface silent failures (style/tile/font errors) instead of a blank map
+window.__errs = [];
+window.addEventListener('error', e => __errs.push('window: ' + e.message));
+window.addEventListener('unhandledrejection', e => __errs.push('promise: ' + (e.reason && e.reason.message || e.reason)));
+
+// ---------- POI categories (OpenMapTiles poi layer: class + subclass-fallback values) ----------
+const POI_CATS = {
+  'Food & drink': { color:'#e8804d', classes:['restaurant','cafe','bar','pub','beer','fast_food','ice_cream','alcohol_shop','food_court'] },
+  'Shopping':     { color:'#c96bb5', classes:['shop','grocery','supermarket','clothing_store','marketplace','mall','department_store','car'] },
+  'Education':    { color:'#7a6ff0', classes:['school','college','university','kindergarten','library','childcare'] },
+  'Health':       { color:'#e0516d', classes:['hospital','pharmacy','clinic','dentist','doctors','veterinary'] },
+  'Transport':    { color:'#4d8fe8', classes:['bus','railway','aerialway','ferry_terminal','fuel','charging_station','parking','bicycle_rental','taxi','harbor'] },
+  'Parks & sport':{ color:'#4caf6e', classes:['park','garden','playground','pitch','golf','swimming','stadium','sports_centre','fitness_centre','campsite','dog_park'] },
+  'Culture':      { color:'#d4a017', classes:['attraction','museum','art_gallery','artwork','monument','castle','theatre','cinema','music','place_of_worship','town_hall','cemetery'] },
+  'Lodging':      { color:'#8d6e63', classes:['lodging'] },
+  'Services':     { color:'#6b7f8c', classes:['post','bank','atm','police','fire_station','courthouse','community_centre','laundry','office'] },
+};
+const catState = Object.fromEntries(Object.keys(POI_CATS).map(k => [k, true]));
+
+const $ = id => document.getElementById(id);
+let toastTimer;
+function toast(msg, ms=2500){
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.display = 'none', ms);
+}
+
+// ---------- Style (custom minimal style: predictable layer ids, live-recolourable) ----------
+const GREEN_LANDUSE = ['pitch','playground','cemetery','stadium','theme_park','zoo'];
+const style = {
+  version: 8,
+  // fonts.openmaptiles.org: free, CORS *, serves Noto/Roboto/Metropolis/Open Sans/PT Sans stacks
+  glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
+  sources: {
+    omt: {
+      type: 'vector',
+      url: 'https://tiles.openfreemap.org/planet',
+      attribution: '<a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://openmaptiles.org">OpenMapTiles</a> © <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>'
+    },
+    dem: {
+      type: 'raster-dem',
+      tiles: ['https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png'],
+      tileSize: 256, encoding: 'terrarium', maxzoom: 15,
+      attribution: 'Terrain: <a href="https://registry.opendata.aws/terrain-tiles/">AWS/Mapzen</a>'
+    },
+    boundary: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+    mask:     { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+    world:    { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon',
+                coordinates: [[[-180,-85],[180,-85],[180,85],[-180,85],[-180,-85]]] } } },
+    bin:      { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+    rin:      { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+    rnin:     { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+    hlines:   { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+  },
+  layers: [
+    { id: 'bg', type: 'background', paint: { 'background-color': '#f2efe9' } },
+    { id: 'landcover-green', type: 'fill', source: 'omt', 'source-layer': 'landcover',
+      filter: ['in', ['get','class'], ['literal', ['grass','wood']]],
+      paint: { 'fill-color': '#a8d5a2', 'fill-opacity': 0.7 } },
+    { id: 'landuse-green', type: 'fill', source: 'omt', 'source-layer': 'landuse',
+      filter: ['in', ['get','class'], ['literal', GREEN_LANDUSE]],
+      paint: { 'fill-color': '#a8d5a2', 'fill-opacity': 0.55 } },
+    { id: 'park', type: 'fill', source: 'omt', 'source-layer': 'park',
+      paint: { 'fill-color': '#a8d5a2', 'fill-opacity': 0.75 } },
+    { id: 'water', type: 'fill', source: 'omt', 'source-layer': 'water',
+      paint: { 'fill-color': '#7fb8d4' } },
+    { id: 'waterway', type: 'line', source: 'omt', 'source-layer': 'waterway',
+      paint: { 'line-color': '#7fb8d4', 'line-width': ['interpolate',['linear'],['zoom'], 8,0.5, 16,3] } },
+    { id: 'road-minor', type: 'line', source: 'omt', 'source-layer': 'transportation', minzoom: 12,
+      filter: ['in', ['get','class'], ['literal', ['tertiary','minor','service']]],
+      paint: { 'line-color': '#ffffff', 'line-width': ['interpolate',['linear'],['zoom'], 12,0.5, 16,4, 19,14] } },
+    { id: 'road-major', type: 'line', source: 'omt', 'source-layer': 'transportation',
+      filter: ['in', ['get','class'], ['literal', ['motorway','trunk','primary','secondary']]],
+      paint: { 'line-color': '#ffffff', 'line-width': ['interpolate',['linear'],['zoom'], 8,1, 16,7, 19,22] } },
+    // In-boundary road mirrors (roads are clipped in JS when a boundary is set — the 'within'
+    // filter can't work: it drops any line not FULLY inside, deleting streets that cross the edge)
+    { id: 'road-minor-in', type: 'line', source: 'rin', minzoom: 12,
+      filter: ['in', ['get','class'], ['literal', ['tertiary','minor','service']]],
+      paint: { 'line-color': '#ffffff', 'line-width': ['interpolate',['linear'],['zoom'], 12,0.5, 16,4, 19,14] } },
+    { id: 'road-major-in', type: 'line', source: 'rin',
+      filter: ['in', ['get','class'], ['literal', ['motorway','trunk','primary','secondary']]],
+      paint: { 'line-color': '#ffffff', 'line-width': ['interpolate',['linear'],['zoom'], 8,1, 16,7, 19,22] } },
+    { id: 'buildings', type: 'fill-extrusion', source: 'omt', 'source-layer': 'building', minzoom: 13,
+      filter: ['!=', ['get','hide_3d'], true],
+      paint: {
+        'fill-extrusion-color': '#d9d0c9',
+        'fill-extrusion-height': ['coalesce', ['get','render_height'], 8],
+        'fill-extrusion-base': ['coalesce', ['get','render_min_height'], 0],
+        'fill-extrusion-opacity': 1
+      } },
+    // In-boundary building mirror: MapLibre's 'within' filter never matches polygon features,
+    // so boundary clipping copies matching buildings into this geojson source instead
+    { id: 'buildings-in', type: 'fill-extrusion', source: 'bin', minzoom: 13,
+      paint: {
+        'fill-extrusion-color': '#d9d0c9',
+        // hscale: per-footprint taper factor (1 centre → ~0.15 at the fog edge), set at clip time
+        'fill-extrusion-height': ['*', ['coalesce', ['get','render_height'], 8], ['coalesce', ['get','hscale'], 1]],
+        'fill-extrusion-base': ['*', ['coalesce', ['get','render_min_height'], 0], ['coalesce', ['get','hscale'], 1]],
+        'fill-extrusion-opacity': 1
+      } },
+    { id: 'night-dim', type: 'fill', source: 'world',
+      paint: { 'fill-color': '#0a0e1a', 'fill-opacity': 0 } },
+    { id: 'mask-fill', type: 'fill', source: 'mask',
+      // fill-antialias off: adjacent translucent bands AA-blend at shared edges into visible
+      // seam lines (wavy dark streaks when draped on terrain); bands share exact coords so no gaps
+      paint: { 'fill-color': '#eef1f2', 'fill-antialias': false, 'fill-opacity': ['coalesce', ['get','op'], 0.82] } },
+    { id: 'fog-edge', type: 'line', source: 'boundary',
+      paint: { 'line-color': '#eef1f2', 'line-opacity': 0.9,
+               'line-width': ['interpolate',['linear'],['zoom'], 10,25, 16,110],
+               'line-blur': ['interpolate',['linear'],['zoom'], 10,25, 16,110],
+               'line-offset': ['interpolate',['linear'],['zoom'], 10,-12, 16,-55] } },
+    { id: 'boundary-line', type: 'line', source: 'boundary',
+      paint: { 'line-color': '#4d8fe8', 'line-width': 2, 'line-dasharray': [2,1.5] } },
+    { id: 'handle-lines', type: 'line', source: 'hlines',
+      paint: { 'line-color': '#4d8fe8', 'line-width': 1.2, 'line-opacity': 0.9 } },
+    { id: 'poi-dots', type: 'circle', source: 'omt', 'source-layer': 'poi', minzoom: 13,
+      paint: { 'circle-radius': ['interpolate',['linear'],['zoom'], 13,2.5, 17,5.5],
+               'circle-pitch-scale': 'map',
+               'circle-color': '#999', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.2 } },
+    { id: 'poi-labels', type: 'symbol', source: 'omt', 'source-layer': 'poi', minzoom: 14,
+      layout: { 'text-field': ['get','name'], 'text-font': ['Klokantech Noto Sans Regular'],
+                'text-size': 11, 'text-offset': [0, 0.9], 'text-anchor': 'top', 'text-optional': true },
+      paint: { 'text-color': '#2b2f36', 'text-halo-color': 'rgba(255,255,255,.9)', 'text-halo-width': 1.3 } },
+    { id: 'road-labels', type: 'symbol', source: 'omt', 'source-layer': 'transportation_name', minzoom: 14,
+      layout: { 'symbol-placement': 'line', 'text-field': ['get','name'],
+                'text-font': ['Klokantech Noto Sans Regular'], 'text-size': 10.5 },
+      paint: { 'text-color': '#5c6168', 'text-halo-color': 'rgba(255,255,255,.85)', 'text-halo-width': 1.2 } },
+    { id: 'road-labels-in', type: 'symbol', source: 'rnin', minzoom: 14,
+      layout: { 'symbol-placement': 'line', 'text-field': ['get','name'],
+                'text-font': ['Klokantech Noto Sans Regular'], 'text-size': 10.5 },
+      paint: { 'text-color': '#5c6168', 'text-halo-color': 'rgba(255,255,255,.85)', 'text-halo-width': 1.2 } },
+    { id: 'place-labels', type: 'symbol', source: 'omt', 'source-layer': 'place',
+      filter: ['in', ['get','class'], ['literal', ['city','town','suburb','village','neighbourhood','quarter']]],
+      layout: { 'text-field': ['get','name'], 'text-font': ['Klokantech Noto Sans Bold'],
+                'text-size': ['match', ['get','class'], 'city', 16, 'town', 14, 12] },
+      paint: { 'text-color': '#40454e', 'text-halo-color': 'rgba(255,255,255,.85)', 'text-halo-width': 1.5 } },
+  ]
+};
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style,
+  center: [144.9631, -37.8136], // Melbourne
+  zoom: 14.5, pitch: 50, bearing: -15,
+  maxPitch: 75, antialias: true
+});
+map.on('error', e => { __errs.push('map: ' + (e.error && e.error.message || e.error)); toast('Map error: ' + (e.error && e.error.message || e.error), 5000); });
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }));
+
+// Guard for interactions before the style finishes loading (pane hidden = load can stall).
+// One-shot flag, NOT map.isStyleLoaded() — that goes false again whenever tiles are streaming,
+// which would silently drop one-shot 'change' events after any pan/zoom.
+let styleReady = false;
+const ready = () => styleReady;
+
+map.on('load', () => {
+  styleReady = true;
+  // Re-sync everything the panel could have changed while the style was still loading
+  applyTimeOfDay(parseFloat($('t-time').value));
+  applyPoiFilter();
+  for (const [id, fn] of Object.entries(recolour)) fn($(id).value);
+  updateTerrain();
+  for (const [selId, [layerIds]] of Object.entries(FONT_TARGETS))
+    layerIds.forEach(id => map.setLayoutProperty(id, 'text-font', [$(selId).value]));
+  const poiVis = $('t-pois').checked ? 'visible' : 'none';
+  map.setLayoutProperty('poi-dots', 'visibility', poiVis);
+  map.setLayoutProperty('poi-labels', 'visibility', poiVis);
+  map.setLayoutProperty('place-labels', 'visibility', $('t-places').checked ? 'visible' : 'none');
+  map.setLayoutProperty('boundary-line', 'visibility', $('t-outline').checked ? 'visible' : 'none');
+  applySolid();
+  if (lastRing) applyBoundary(lastRing, false); // search completed pre-load
+});
+
+// ---------- POI filtering ----------
+function poiColorExpr(){
+  const m = ['match', ['get','class']];
+  for (const {color, classes} of Object.values(POI_CATS)) m.push(classes, color);
+  m.push('#999');
+  return m;
+}
+function applyPoiFilter(){
+  if (!ready()) return;
+  const enabled = Object.entries(catState).filter(([,on]) => on)
+    .flatMap(([k]) => POI_CATS[k].classes);
+  // rank = importance within a grid cell (ascending); cap it tighter when zoomed out
+  const rankOk = ['any', ['!', ['has','rank']],
+    ['<=', ['get','rank'], ['step', ['zoom'], 10, 14, 16, 15, 24, 16, 40, 17, 10000]]];
+  let f = ['all', ['has','name'], ['in', ['get','class'], ['literal', enabled]], rankOk];
+  if (lastRing) f = ['all', f, ['within', { type: 'Polygon', coordinates: [lastRing] }]];
+  map.setFilter('poi-dots', f);
+  // ponytail: no per-label camera-distance culling — 'distance-from-center' is Mapbox-only,
+  // MapLibre rejects it (error event, not throw). Rank cap + collision detection thin labels.
+  map.setFilter('poi-labels', f);
+  map.setPaintProperty('poi-dots', 'circle-color', poiColorExpr());
+}
+const catBox = $('poi-cats');
+for (const [name, {color}] of Object.entries(POI_CATS)) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `<label style="display:flex;align-items:center;gap:6px">
+    <input type="checkbox" checked><span class="dot" style="background:${color}"></span>${name}</label>`;
+  row.querySelector('input').addEventListener('change', e => {
+    catState[name] = e.target.checked; applyPoiFilter();
+  });
+  catBox.appendChild(row);
+}
+$('t-pois').addEventListener('change', e => {
+  if (!ready()) return;
+  const v = e.target.checked ? 'visible' : 'none';
+  map.setLayoutProperty('poi-dots', 'visibility', v);
+  map.setLayoutProperty('poi-labels', 'visibility', v);
+});
+$('t-places').addEventListener('change', e => {
+  if (ready()) map.setLayoutProperty('place-labels', 'visibility', e.target.checked ? 'visible' : 'none');
+});
+
+// ---------- Label fonts (stacks verified live on fonts.openmaptiles.org) ----------
+const FONTS = [
+  'Klokantech Noto Sans Regular','Klokantech Noto Sans Bold','Klokantech Noto Sans Italic',
+  'Metropolis Light','Metropolis Regular','Metropolis Semi Bold','Metropolis Bold',
+  'Open Sans Regular','Open Sans Semibold','Open Sans Bold','Open Sans Italic',
+  'PT Sans Regular','PT Sans Bold',
+  'Roboto Regular','Roboto Medium','Roboto Bold','Roboto Condensed Regular','Roboto Slab Regular'
+];
+const FONT_TARGETS = {
+  'f-poi':   [['poi-labels'],                    'Klokantech Noto Sans Regular'],
+  'f-place': [['place-labels'],                  'Klokantech Noto Sans Bold'],
+  'f-road':  [['road-labels','road-labels-in'],  'Klokantech Noto Sans Regular'],
+};
+for (const [selId, [layerIds, def]] of Object.entries(FONT_TARGETS)) {
+  const sel = $(selId);
+  for (const f of FONTS) {
+    const o = document.createElement('option');
+    o.value = f; o.textContent = f.replace('Klokantech ', '');
+    sel.appendChild(o);
+  }
+  sel.value = def;
+  sel.addEventListener('change', e => {
+    if (ready()) layerIds.forEach(id => map.setLayoutProperty(id, 'text-font', [e.target.value]));
+  });
+}
+
+// ---------- Time of day (sun-driven light shades extrusion faces; sky/fog/ambient keyframed) ----------
+// ponytail: no true cast shadows — MapLibre's engine can't project building shadows onto the
+// ground; that needs a plugin like ShadeMap (paid data). Directional face shading + atmosphere only.
+const TOD_KEYS = [
+  [0,    { sky:'#0b1026', hor:'#16223c', fog:'#131a2c', dim:0.50, int:0.08, lc:'#9db4d6' }],
+  [5,    { sky:'#141d38', hor:'#2e3050', fog:'#232840', dim:0.45, int:0.12, lc:'#a8b8d8' }],
+  [6.5,  { sky:'#8db4dd', hor:'#f2b06e', fog:'#e8c8a8', dim:0.18, int:0.35, lc:'#ffd9b0' }],
+  [8,    { sky:'#9ecdf3', hor:'#e6eef2', fog:'#eef1f2', dim:0.00, int:0.50, lc:'#ffffff' }],
+  [12,   { sky:'#9ecdf3', hor:'#e6eef2', fog:'#eef1f2', dim:0.00, int:0.60, lc:'#ffffff' }],
+  [16.5, { sky:'#96c4e8', hor:'#f0e6d8', fog:'#eeeee8', dim:0.00, int:0.50, lc:'#fff4e0' }],
+  [18.5, { sky:'#7d8fc0', hor:'#f2955e', fog:'#e0b493', dim:0.18, int:0.30, lc:'#ffc890' }],
+  [20,   { sky:'#141d38', hor:'#2e3050', fog:'#232840', dim:0.45, int:0.12, lc:'#a8b8d8' }],
+  [24,   { sky:'#0b1026', hor:'#16223c', fog:'#131a2c', dim:0.50, int:0.08, lc:'#9db4d6' }],
+];
+const lerp = (a, b, t) => a + (b - a) * t;
+function lerpColor(a, b, t){
+  const pa = [1,3,5].map(i => parseInt(a.slice(i, i+2), 16));
+  const pb = [1,3,5].map(i => parseInt(b.slice(i, i+2), 16));
+  return '#' + pa.map((v, i) => Math.round(lerp(v, pb[i], t)).toString(16).padStart(2, '0')).join('');
+}
+function todAt(h){
+  let i = 0;
+  while (TOD_KEYS[i+1][0] < h) i++;
+  const [h0, a] = TOD_KEYS[i], [h1, b] = TOD_KEYS[i+1];
+  const t = (h - h0) / (h1 - h0);
+  const out = {};
+  for (const k of Object.keys(a))
+    out[k] = typeof a[k] === 'number' ? lerp(a[k], b[k], t) : lerpColor(a[k], b[k], t);
+  return out;
+}
+function applyTimeOfDay(h){
+  if (!ready()) return;
+  const k = todAt(h);
+  // fog-* sky keys only render once 3D terrain is enabled (MapLibre spec); latent until then
+  map.setSky({ 'sky-color': k.sky, 'horizon-color': k.hor, 'fog-color': k.fog,
+               'sky-horizon-blend': 0.6, 'horizon-fog-blend': 0.6, 'fog-ground-blend': 0.8 });
+  // Sun: east 6am → north noon (southern hemisphere) → west 6pm; polar 0 = overhead
+  const day = h > 6 && h < 18;
+  const az = ((90 - (h - 6) * 15) % 360 + 360) % 360;
+  const polar = day ? 88 - 58 * Math.sin(Math.PI * (h - 6) / 12) : 90;
+  map.setLight({ anchor: 'map', position: [1.15, az, polar], color: k.lc, intensity: k.int });
+  map.setPaintProperty('night-dim', 'fill-opacity', k.dim);
+  curFog = k.fog; curDim = k.dim;
+  updateMaskStyle();
+}
+// Fog must contrast with the ground (light ground → darken outside, and vice versa), but the
+// contrast strength follows time of day — full-dark fog at noon read as permanent night
+let curFog = '#eef1f2', curDim = 0; // time-of-day fog tint + darkness (0 day … 0.5 night)
+function relLum(hex){
+  const [r, g, b] = [1,3,5].map(i => parseInt(hex.slice(i, i+2), 16) / 255);
+  return 0.2126*r + 0.7152*g + 0.0722*b;
+}
+function updateMaskStyle(){
+  if (!ready()) return;
+  const groundLight = relLum($('c-ground').value) >= 0.45;
+  const c = groundLight
+    ? lerpColor(curFog, '#05070d', 0.38 + curDim * 0.74)  // daytime: mid grey → night: near-black
+    : lerpColor(curFog, '#ffffff', 0.75 - curDim * 0.9);  // daytime: bright → night: barely lifted
+  map.setPaintProperty('mask-fill', 'fill-color', c);
+  map.setPaintProperty('fog-edge', 'line-color', c);
+}
+function fmtTime(h){
+  const hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+  return hh + ':' + String(mm).padStart(2, '0');
+}
+$('t-time').addEventListener('input', e => {
+  const h = parseFloat(e.target.value);
+  $('t-time-v').textContent = fmtTime(h);
+  applyTimeOfDay(h);
+});
+
+// POI click popup
+map.on('click', 'poi-dots', e => {
+  const f = e.features[0];
+  new maplibregl.Popup({ closeButton: false })
+    .setLngLat(e.lngLat)
+    .setHTML(`<b>${f.properties.name || '(unnamed)'}</b><br><span style="color:#8b919c">${f.properties.class}${f.properties.subclass && f.properties.subclass !== f.properties.class ? ' · ' + f.properties.subclass : ''}</span>`)
+    .addTo(map);
+});
+map.on('mouseenter', 'poi-dots', () => { if (!drawMode) map.getCanvas().style.cursor = 'pointer'; });
+map.on('mouseleave', 'poi-dots', () => { map.getCanvas().style.cursor = drawMode ? 'crosshair' : ''; });
+
+// ---------- Colours ----------
+const recolour = {
+  'c-building': v => { map.setPaintProperty('buildings', 'fill-extrusion-color', v);
+                       map.setPaintProperty('buildings-in', 'fill-extrusion-color', v); },
+  'c-water':    v => { map.setPaintProperty('water', 'fill-color', v);
+                       map.setPaintProperty('waterway', 'line-color', v); },
+  'c-green':    v => { map.setPaintProperty('landcover-green', 'fill-color', v);
+                       map.setPaintProperty('landuse-green', 'fill-color', v);
+                       map.setPaintProperty('park', 'fill-color', v); },
+  'c-ground':   v => { map.setPaintProperty('bg', 'background-color', v); updateMaskStyle(); },
+};
+for (const [id, fn] of Object.entries(recolour))
+  $(id).addEventListener('input', e => { if (ready()) fn(e.target.value); });
+
+// ---------- Terrain ----------
+function updateTerrain(){
+  if (!ready()) return;
+  if ($('t-terrain').checked)
+    map.setTerrain({ source: 'dem', exaggeration: parseFloat($('t-exag').value) });
+  else
+    map.setTerrain(null);
+}
+$('t-terrain').addEventListener('change', updateTerrain);
+$('t-exag').addEventListener('input', e => {
+  $('t-exag-v').textContent = parseFloat(e.target.value).toFixed(1);
+  updateTerrain();
+});
+
+// ---------- Boundary (everything runs off a generic polygon ring — rect/ellipse/freeform) ----------
+let boundaryShape = 'rect', lastBounds = null, lastRing = null;
+function rectRing(w, s, e, n){ return [[w,s],[e,s],[e,n],[w,n],[w,s]]; }
+function ellipseRing(w, s, e, n, steps = 72){
+  const cx = (w+e)/2, cy = (s+n)/2, rx = (e-w)/2, ry = (n-s)/2, ring = [];
+  for (let i = 0; i <= steps; i++) {
+    const a = i / steps * 2 * Math.PI;
+    ring.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]);
+  }
+  return ring;
+}
+function boundaryRing(w, s, e, n){ // freeform rings come straight from the drawn path
+  return boundaryShape === 'ellipse' ? ellipseRing(w,s,e,n) : rectRing(w,s,e,n);
+}
+function ringBBox(ring){
+  let w = 180, e = -180, s = 85, n = -85;
+  for (const [x, y] of ring) { w = Math.min(w,x); e = Math.max(e,x); s = Math.min(s,y); n = Math.max(n,y); }
+  return [w, s, e, n];
+}
+function ringCentroid(ring){
+  let sx = 0, sy = 0;
+  for (const p of ring) { sx += p[0]; sy += p[1]; }
+  return [sx/ring.length, sy/ring.length];
+}
+function scaleRing(ring, f){
+  const [cx, cy] = ringCentroid(ring);
+  return ring.map(([x, y]) => [cx + (x-cx)*f, Math.max(-85, Math.min(85, cy + (y-cy)*f))]);
+}
+function pointInRing(x, y, ring){
+  let inside = false;
+  for (let i = 1, j = 0; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if ((yi > y) !== (yj > y) && x < (xj-xi)*(y-yi)/(yj-yi)+xi) inside = !inside;
+  }
+  return inside;
+}
+function band(outer, hole, op){
+  return { type: 'Feature', properties: { op }, geometry: { type: 'Polygon', coordinates: [outer, hole] } };
+}
+function setBoundaryShapes(ring){
+  if (!map.getSource('boundary')) return;
+  map.getSource('boundary').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: ring } });
+  // Gradient fog: many thin concentric bands with eased opacity out to ~2.8× the boundary
+  const N = 24, feats = [];
+  let inner = ring;
+  for (let i = 0; i < N; i++) {
+    const outer = scaleRing(ring, 1 + (i+1) * (1.8 / N));
+    feats.push(band(outer, inner, 0.2 + 0.68 * Math.pow((i+1)/N, 0.75)));
+    inner = outer;
+  }
+  feats.push(band(rectRing(-180,-85,180,85), inner, 0.93));
+  map.getSource('mask').setData({ type: 'FeatureCollection', features: feats });
+}
+const BUILDING_BASE_FILTER = ['!=', ['get','hide_3d'], true];
+function insideBoundary(x, y){ return pointInRing(x, y, lastRing); }
+// Parameter t on segment a→b where it crosses segment c→d, or null
+function segSegT(a, b, c, d){
+  const rx = b[0]-a[0], ry = b[1]-a[1], sx = d[0]-c[0], sy = d[1]-c[1];
+  const denom = rx*sy - ry*sx;
+  if (!denom) return null;
+  const t = ((c[0]-a[0])*sy - (c[1]-a[1])*sx) / denom;
+  const u = ((c[0]-a[0])*ry - (c[1]-a[1])*rx) / denom;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : null;
+}
+// Clip a coordinate chain to the boundary ring; returns the pieces that lie inside
+function clipChain(coords){
+  const pieces = [];
+  let cur = null;
+  let inNow = pointInRing(coords[0][0], coords[0][1], lastRing);
+  if (inNow) cur = [coords[0]];
+  for (let i = 1; i < coords.length; i++) {
+    const q = coords[i-1], p = coords[i];
+    const ts = [];
+    for (let j = 1; j < lastRing.length; j++) {
+      const t = segSegT(q, p, lastRing[j-1], lastRing[j]);
+      if (t !== null) ts.push(t);
+    }
+    ts.sort((a, b) => a - b);
+    for (const t of ts) {
+      const pt = [q[0] + (p[0]-q[0])*t, q[1] + (p[1]-q[1])*t];
+      if (inNow) { if (cur) { cur.push(pt); if (cur.length > 1) pieces.push(cur); } cur = null; }
+      else cur = [pt];
+      inNow = !inNow;
+    }
+    if (inNow) { if (!cur) cur = [p]; else cur.push(p); }
+  }
+  if (cur && cur.length > 1) pieces.push(cur);
+  return pieces;
+}
+// Buildings outside the boundary disappear: copy in-boundary features (centroid test) from
+// loaded vector tiles into the 'bin' geojson source and hide the full vector layer.
+// ponytail: tile-border pieces kept undeduped — overlapping buffer walls are invisible at opacity 1
+function refreshBuildingClip(){
+  if (!ready()) return;
+  if (!lastRing) {
+    lastClipCount = -1;
+    map.getSource('bin').setData({ type: 'FeatureCollection', features: [] });
+    map.setLayoutProperty('buildings', 'visibility', 'visible');
+    return;
+  }
+  const feats = map.querySourceFeatures('omt', { sourceLayer: 'building', filter: BUILDING_BASE_FILTER });
+  // OpenMapTiles merges same-height buildings into huge MultiPolygons (1000s of footprints per
+  // feature), so test each constituent polygon's centroid, not the feature's
+  const centroidIn = ring => {
+    let sx = 0, sy = 0;
+    for (const p of ring) { sx += p[0]; sy += p[1]; }
+    const cx = sx/ring.length, cy = sy/ring.length;
+    return insideBoundary(cx, cy) ? [cx, cy] : null;
+  };
+  // Mapbox-style height taper (cutoff-fade-range look): scale each footprint's height by how far
+  // it sits between the boundary centre and the edge, measured along its own ray — full height
+  // for the inner half, easing to 15% at the fog edge. Static per clip, not camera-tracked.
+  const taper = $('t-taper').checked;
+  const bc = ringCentroid(lastRing);
+  const edgeT = (cx, cy) => {
+    const dx = cx - bc[0], dy = cy - bc[1];
+    const d = Math.hypot(dx, dy);
+    if (!d) return 0;
+    const far = [bc[0] + dx*1e3, bc[1] + dy*1e3];
+    let tMin = Infinity;
+    for (let j = 1; j < lastRing.length; j++) {
+      const t = segSegT(bc, far, lastRing[j-1], lastRing[j]);
+      if (t !== null && t < tMin) tMin = t;
+    }
+    return isFinite(tMin) ? Math.min(1, 1e-3 / tMin) : 0; // d/rEdge = (d)/(tMin*d*1e3)
+  };
+  const taperScale = t => t <= 0.5 ? 1 : 1 - 0.85 * Math.pow((t - 0.5) / 0.5, 1.4);
+  const kept = []; let polyCount = 0;
+  const pushPoly = (coords, props, cent) => {
+    const p = taper ? { ...props, hscale: +taperScale(edgeT(cent[0], cent[1])).toFixed(3) } : props;
+    kept.push({ type: 'Feature', properties: p, geometry: { type: 'Polygon', coordinates: coords } });
+    polyCount++;
+  };
+  for (const f of feats) {
+    const g = f.geometry;
+    const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+    for (const poly of polys) {
+      const cent = centroidIn(poly[0]);
+      if (cent) pushPoly(poly, f.properties, cent);
+    }
+  }
+  // setData retriggers source events — skip when stable or the refresh handlers would loop forever
+  if (polyCount !== lastClipCount) {
+    lastClipCount = polyCount;
+    map.getSource('bin').setData({ type: 'FeatureCollection', features: kept });
+  }
+  map.setLayoutProperty('buildings', 'visibility', 'none');
+}
+let lastClipCount = -1;
+
+// Roads clipped the same way — but lines need real geometry clipping at the boundary edge
+// (a 'within' filter would delete any street that pokes past the edge)
+const ROAD_MIRRORS = [['rin', 'transportation'], ['rnin', 'transportation_name']];
+const roadClipCounts = { rin: -1, rnin: -1 };
+function refreshRoadClip(){
+  if (!ready()) return;
+  const vis = lastRing ? 'none' : 'visible';
+  for (const id of ['road-minor','road-major','road-labels']) map.setLayoutProperty(id, 'visibility', vis);
+  for (const [srcId, sourceLayer] of ROAD_MIRRORS) {
+    if (!lastRing) {
+      roadClipCounts[srcId] = -1;
+      map.getSource(srcId).setData({ type: 'FeatureCollection', features: [] });
+      continue;
+    }
+    const feats = map.querySourceFeatures('omt', { sourceLayer });
+    const kept = []; let pieceCount = 0;
+    for (const f of feats) {
+      const g = f.geometry;
+      const lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
+      const pieces = [];
+      for (const ln of lines) pieces.push(...clipChain(ln));
+      if (pieces.length) {
+        kept.push({ type: 'Feature', properties: f.properties, geometry: { type: 'MultiLineString', coordinates: pieces } });
+        pieceCount += pieces.length;
+      }
+    }
+    if (pieceCount !== roadClipCounts[srcId]) {
+      roadClipCounts[srcId] = pieceCount;
+      map.getSource(srcId).setData({ type: 'FeatureCollection', features: kept });
+    }
+  }
+}
+function refreshClips(){ refreshBuildingClip(); refreshRoadClip(); }
+// Re-clip as tiles stream in (new zoom levels carry more/finer features).
+// 'sourcedata' not 'idle': the auto-orbit keeps the camera moving, so 'idle' can starve forever.
+map.on('sourcedata', ev => {
+  if (lastRing && ev.sourceId === 'omt' && ev.isSourceLoaded) refreshClips();
+});
+map.on('idle', () => { if (lastRing) refreshClips(); });
+
+// POIs and places are points, where MapLibre's 'within' works natively
+const PLACE_BASE_FILTER = ['in', ['get','class'], ['literal', ['city','town','suburb','village','neighbourhood','quarter']]];
+function applyPlaceFilter(){
+  if (!ready()) return;
+  map.setFilter('place-labels', lastRing
+    ? ['all', PLACE_BASE_FILTER, ['within', { type: 'Polygon', coordinates: [lastRing] }]]
+    : PLACE_BASE_FILTER);
+}
+
+function applyBoundary(ring, refit = true){
+  lastRing = ring;
+  const [w, s, e, n] = ringBBox(ring);
+  lastBounds = [w, s, e, n];
+  setBoundaryShapes(ring);
+  lastClipCount = -1; roadClipCounts.rin = -1; roadClipCounts.rnin = -1; // force refresh through
+  refreshClips();
+  applyPoiFilter(); applyPlaceFilter();
+  $('recenter-row').style.display = '';
+  stopOrbit(); armIdle(); // an active orbit's setBearing would kill the fitBounds easing
+  // maxBounds padded ~60% so the camera can pull back a little past the edge
+  const pw = (e - w) * 0.6, ph = (n - s) * 0.6;
+  map.setMaxBounds([[w - pw, Math.max(s - ph, -85)], [e + pw, Math.min(n + ph, 85)]]);
+  if (refit) map.fitBounds([[w, s], [e, n]], { padding: 40, pitch: 50, duration: 1200 });
+}
+function clearBoundary(){
+  lastBounds = null; lastRing = null;
+  clearFreeVerts();
+  map.setMaxBounds(null);
+  if (map.getSource('boundary')) {
+    map.getSource('boundary').setData({ type: 'FeatureCollection', features: [] });
+    map.getSource('mask').setData({ type: 'FeatureCollection', features: [] });
+  }
+  refreshClips(); // restores the vector layers + empties the mirrors
+  applyPoiFilter(); applyPlaceFilter();
+  $('recenter-row').style.display = 'none';
+  toast('Boundary cleared');
+}
+$('btn-clear').addEventListener('click', clearBoundary);
+$('btn-recenter').addEventListener('click', () => {
+  if (!lastBounds) return;
+  const [w, s, e, n] = lastBounds;
+  map.fitBounds([[w, s], [e, n]], { padding: 40, pitch: 50, duration: 1000 });
+});
+$('t-outline').addEventListener('change', e => {
+  if (ready()) map.setLayoutProperty('boundary-line', 'visibility', e.target.checked ? 'visible' : 'none');
+});
+
+function setShape(shape){
+  boundaryShape = shape;
+  $('shape-rect').classList.toggle('active', shape === 'rect');
+  $('shape-ellipse').classList.toggle('active', shape === 'ellipse');
+  $('shape-free').classList.toggle('active', shape === 'freeform');
+  if (shape !== 'freeform') {
+    clearFreeVerts();
+    // reshape an existing boundary in place (freeform has no bounds-derived shape to switch to)
+    if (lastBounds) applyBoundary(boundaryRing(...lastBounds), false);
+  }
+}
+$('shape-rect').addEventListener('click', () => setShape('rect'));
+$('shape-ellipse').addEventListener('click', () => setShape('ellipse'));
+$('shape-free').addEventListener('click', () => setShape('freeform'));
+
+// Search (Nominatim — manual, on demand only; usage policy forbids autocomplete)
+let searchSeq = 0;
+async function doSearch(){
+  const q = $('search').value.trim();
+  if (!q) return;
+  const seq = ++searchSeq;
+  toast('Searching…', 4000);
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if (seq !== searchSeq) return; // superseded by a newer search
+    if (!Array.isArray(j) || !j.length) { toast('No result for "' + q + '"'); return; }
+    let [s, n, w, e] = j[0].boundingbox.map(Number); // [minLat, maxLat, minLon, maxLon]
+    if (e - w > 180) { // antimeridian-crossing bbox (Fiji, NZ) — box around the centre instead
+      const lat = +j[0].lat, lon = +j[0].lon;
+      w = lon - 0.1; e = lon + 0.1; s = lat - 0.07; n = lat + 0.07;
+    }
+    s = Math.max(s, -85); n = Math.min(n, 85);
+    if (boundaryShape === 'freeform') setShape('rect'); // searches produce a box shape
+    applyBoundary(boundaryRing(w, s, e, n));
+    toast(j[0].display_name.split(',').slice(0, 3).join(','), 3500);
+  } catch (err) { toast('Search failed: ' + err.message); }
+}
+$('btn-go').addEventListener('click', doSearch);
+$('search').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+// Draw boundary (drag box for rect/ellipse; click-to-place editable points for freeform)
+let drawMode = false, drawStart = null, lastClickPt = null;
+let freeVerts = [], freeMarkers = [], freeMids = [], freeSharp = [];
+let freeHOut = [], freeHIn = [], freeAuto = [];   // bezier handle offsets + auto flag per anchor
+let selAnchor = -1, freeHandleMarkers = [];       // selected anchor shows its two handles
+const btnDraw = $('btn-draw');
+
+// Closed cubic-bezier path through the anchors — Illustrator-style. Each anchor has an
+// out-handle (curve leaving it) and in-handle (curve entering it), stored as offsets so they
+// travel with the anchor. Anchors start "auto" (handles derived from neighbours × the tension
+// slider, i.e. Catmull-Rom equivalent); dragging a handle makes the anchor custom.
+function recomputeAutoHandles(){
+  // "Curved corners" off → auto anchors get zero handles (straight segments); hand-pulled
+  // handles curve regardless, exactly like an Illustrator path
+  const n = freeVerts.length;
+  const s = $('t-curve').checked ? parseFloat($('t-tension').value) : 0;
+  for (let i = 0; i < n; i++) {
+    if (freeSharp[i]) { freeHOut[i] = [0,0]; freeHIn[i] = [0,0]; continue; }
+    if (freeAuto[i] === false) continue; // hand-edited — leave alone
+    const prev = freeVerts[(i-1+n)%n], next = freeVerts[(i+1)%n];
+    const mx = s*(next[0]-prev[0])/3, my = s*(next[1]-prev[1])/3;
+    freeHOut[i] = [mx, my]; freeHIn[i] = [-mx, -my];
+  }
+}
+function bez(a, c1, c2, b, t){
+  const u = 1-t, w0 = u*u*u, w1 = 3*u*u*t, w2 = 3*u*t*t, w3 = t*t*t;
+  return [w0*a[0]+w1*c1[0]+w2*c2[0]+w3*b[0], w0*a[1]+w1*c1[1]+w2*c2[1]+w3*b[1]];
+}
+function segPoint(i, t){
+  const n = freeVerts.length, j = (i+1)%n;
+  const a = freeVerts[i], b = freeVerts[j];
+  return bez(a, [a[0]+freeHOut[i][0], a[1]+freeHOut[i][1]],
+                [b[0]+freeHIn[j][0], b[1]+freeHIn[j][1]], b, t);
+}
+function freeformRing(){
+  let pts = freeVerts;
+  if (freeVerts.length >= 3) {
+    recomputeAutoHandles();
+    pts = [];
+    for (let i = 0; i < freeVerts.length; i++)
+      for (let j = 0; j < 10; j++) pts.push(segPoint(i, j/10));
+  }
+  return [...pts, pts[0]];
+}
+function previewFree(){ if (freeVerts.length >= 3) setBoundaryShapes(freeformRing()); }
+function commitFree(refit = true){
+  if (freeVerts.length < 3) return;
+  applyBoundary(freeformRing(), refit);
+  rebuildFreeMarkers(); // markers + midpoint handles follow every edit
+}
+function clearFreeVerts(){
+  freeMarkers.forEach(m => m.remove());
+  freeMids.forEach(m => m.remove());
+  freeMarkers = []; freeMids = []; freeVerts = []; freeSharp = [];
+  freeHOut = []; freeHIn = []; freeAuto = [];
+  selAnchor = -1;
+  updateHandleUI();
+}
+function spliceAnchor(i, del, vert){ // keep every per-anchor array in sync
+  if (del) { freeVerts.splice(i,1); freeSharp.splice(i,1); freeHOut.splice(i,1); freeHIn.splice(i,1); freeAuto.splice(i,1); }
+  else { freeVerts.splice(i,0,vert); freeSharp.splice(i,0,false); freeHOut.splice(i,0,[0,0]); freeHIn.splice(i,0,[0,0]); freeAuto.splice(i,0,true); }
+  selAnchor = -1;
+}
+// Selected anchor's direction handles: two thin lines + draggable round dots
+function updateHandleUI(){
+  freeHandleMarkers.forEach(m => m.remove());
+  freeHandleMarkers = [];
+  const src = map.getSource && map.getSource('hlines');
+  freeMarkers.forEach((m, i) => m.getElement().classList.toggle('sel', i === selAnchor));
+  if (selAnchor < 0 || selAnchor >= freeVerts.length || boundaryShape !== 'freeform') {
+    if (src) src.setData({ type: 'FeatureCollection', features: [] });
+    return;
+  }
+  recomputeAutoHandles();
+  const a = freeVerts[selAnchor];
+  const ends = [
+    [a[0]+freeHIn[selAnchor][0],  a[1]+freeHIn[selAnchor][1]],
+    [a[0]+freeHOut[selAnchor][0], a[1]+freeHOut[selAnchor][1]],
+  ];
+  if (src) src.setData({ type: 'FeatureCollection',
+    features: ends.map(p => ({ type: 'Feature', geometry: { type: 'LineString', coordinates: [a, p] } })) });
+  ends.forEach((p, k) => {
+    const el = document.createElement('div');
+    el.className = 'hdl';
+    const m = new maplibregl.Marker({ element: el, draggable: true }).setLngLat(p).addTo(map);
+    m.on('drag', () => { const ll = m.getLngLat(); applyHandleDrag(k === 0 ? 'in' : 'out', [ll.lng, ll.lat], false); });
+    m.on('dragend', () => commitFree(false));
+    freeHandleMarkers.push(m);
+  });
+}
+function applyHandleDrag(key, pos, alt){
+  const i = selAnchor;
+  if (i < 0) return;
+  const a = freeVerts[i];
+  const h = [pos[0]-a[0], pos[1]-a[1]];
+  freeAuto[i] = false; freeSharp[i] = false;
+  if (key === 'out') freeHOut[i] = h; else freeHIn[i] = h;
+  if (!alt) { // smooth point: opposite handle mirrors direction, keeps its own length (Alt breaks it)
+    const opp = key === 'out' ? freeHIn[i] : freeHOut[i];
+    const hl = Math.hypot(h[0], h[1]);
+    if (hl > 0) {
+      const len = Math.hypot(opp[0], opp[1]) || hl;
+      const mir = [-h[0]/hl*len, -h[1]/hl*len];
+      if (key === 'out') freeHIn[i] = mir; else freeHOut[i] = mir;
+    }
+  }
+  previewFree();
+  refreshHandleVisual();
+}
+function refreshHandleVisual(){ // cheap per-frame update during drags
+  if (selAnchor < 0 || selAnchor >= freeVerts.length) return;
+  const a = freeVerts[selAnchor];
+  const pin  = [a[0]+freeHIn[selAnchor][0],  a[1]+freeHIn[selAnchor][1]];
+  const pout = [a[0]+freeHOut[selAnchor][0], a[1]+freeHOut[selAnchor][1]];
+  const src = map.getSource('hlines');
+  if (src) src.setData({ type: 'FeatureCollection', features: [
+    { type: 'Feature', geometry: { type: 'LineString', coordinates: [a, pin] } },
+    { type: 'Feature', geometry: { type: 'LineString', coordinates: [a, pout] } },
+  ]});
+  if (freeHandleMarkers[0]) freeHandleMarkers[0].setLngLat(pin);
+  if (freeHandleMarkers[1]) freeHandleMarkers[1].setLngLat(pout);
+}
+function addVertMarker(lngLat){
+  const el = document.createElement('div');
+  el.className = 'vert' + (freeSharp[freeMarkers.length] ? ' sharp' : '');
+  const m = new maplibregl.Marker({ element: el, draggable: true }).setLngLat(lngLat).addTo(map);
+  m.on('drag', () => {
+    const ll = m.getLngLat();
+    const i = freeMarkers.indexOf(m);
+    freeVerts[i] = [ll.lng, ll.lat];
+    previewFree();
+    if (selAnchor === i) refreshHandleVisual();
+  });
+  m.on('dragend', () => commitFree(false));
+  // swallow clicks so they never bubble to the map (in draw mode that would add stray points)
+  el.addEventListener('click', ev => {
+    ev.stopPropagation();
+    if (!drawMode) { selAnchor = freeMarkers.indexOf(m); updateHandleUI(); } // select → show handles
+  });
+  el.addEventListener('dblclick', ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    if (drawMode) { // the finishing dblclick lands on the just-placed marker — treat as finish
+      setDrawMode(false);
+      commitFree(true);
+      toast('Click a point for handles · drag handles to shape · double-click = sharp · right-click = delete', 5500);
+      return;
+    }
+    const i = freeMarkers.indexOf(m); // otherwise: toggle a sharp corner
+    freeSharp[i] = !freeSharp[i];
+    freeAuto[i] = true; // un-sharpening regrows auto handles
+    commitFree(false);
+  });
+  el.addEventListener('contextmenu', ev => { // right-click deletes the point
+    ev.preventDefault(); ev.stopPropagation();
+    if (freeVerts.length <= 3) { toast('A boundary needs at least 3 points'); return; }
+    spliceAnchor(freeMarkers.indexOf(m), true);
+    commitFree(false);
+  });
+  freeMarkers.push(m);
+}
+// Midpoint handles sit ON the rendered edge (spline-aware); grabbing one inserts a new point
+function segMidpoint(i){
+  recomputeAutoHandles();
+  return segPoint(i, 0.5);
+}
+function addMidMarker(i){
+  const el = document.createElement('div');
+  el.className = 'vert-mid';
+  const m = new maplibregl.Marker({ element: el, draggable: true }).setLngLat(segMidpoint(i)).addTo(map);
+  let vi = null, dragged = false; // vi = the vertex index once this handle is promoted to a point
+  const promote = () => {
+    if (vi !== null) return;
+    vi = i + 1;
+    const ll = m.getLngLat();
+    spliceAnchor(vi, false, [ll.lng, ll.lat]);
+  };
+  m.on('dragstart', () => { dragged = true; promote(); });
+  m.on('drag', () => { const ll = m.getLngLat(); freeVerts[vi] = [ll.lng, ll.lat]; previewFree(); });
+  m.on('dragend', () => commitFree(false));
+  el.addEventListener('click', ev => { // plain click inserts without moving
+    ev.stopPropagation();
+    if (dragged) return; // click fires after a drag too — already handled
+    promote(); commitFree(false);
+  });
+  freeMids.push(m);
+}
+function rebuildFreeMarkers(){
+  freeMarkers.forEach(m => m.remove());
+  freeMids.forEach(m => m.remove());
+  freeMarkers = []; freeMids = [];
+  if (boundaryShape === 'freeform' && freeVerts.length >= 3) {
+    freeVerts.forEach(v => addVertMarker({ lng: v[0], lat: v[1] }));
+    for (let i = 0; i < freeVerts.length; i++) addMidMarker(i);
+  }
+  updateHandleUI();
+}
+
+function setDrawMode(on){
+  drawMode = on; drawStart = null; lastClickPt = null;
+  btnDraw.classList.toggle('active', on);
+  // set on canvas AND container — maplibre's grab-cursor rule lives on the container
+  const cur = on ? 'crosshair' : '';
+  map.getCanvas().style.cursor = cur;
+  map.getCanvasContainer().style.cursor = cur;
+  if (!on) map.dragPan.enable(); // never leak a disabled dragPan out of draw mode
+  if (on && boundaryShape === 'freeform') clearFreeVerts(); // start a fresh point set
+  if (on) toast(boundaryShape === 'freeform' ? 'Click to add points (drag to pull out curve handles), double-click to finish'
+    : 'Drag a' + (boundaryShape === 'ellipse' ? 'n ellipse' : ' rectangle') + ' on the map', 4000);
+}
+function restoreBoundary(){
+  if (lastRing) applyBoundary(lastRing, false); else clearBoundary();
+}
+// Button released off-canvas (over the panel / outside the window): cancel the gesture
+window.addEventListener('mouseup', () => {
+  if (drawMode && drawStart) { setDrawMode(false); restoreBoundary(); }
+});
+btnDraw.addEventListener('click', () => {
+  const finishing = drawMode;
+  setDrawMode(!drawMode);
+  if (finishing && boundaryShape === 'freeform') {
+    // toggling off mid-placement: enough points = finish, otherwise cancel
+    if (freeVerts.length >= 3) commitFree(true);
+    else { clearFreeVerts(); restoreBoundary(); }
+  }
+});
+
+// Freeform pen tool: press to place an anchor; drag before releasing to pull out symmetric
+// direction handles (Illustrator pen behaviour); double-click to close the polygon.
+let penDrag = null;
+map.on('mousedown', e => {
+  if (!drawMode || boundaryShape !== 'freeform') return;
+  if (lastClickPt && Math.hypot(e.point.x - lastClickPt.x, e.point.y - lastClickPt.y) < 5) return; // dblclick echo
+  lastClickPt = e.point;
+  e.preventDefault();
+  map.dragPan.disable();
+  freeVerts.push([e.lngLat.lng, e.lngLat.lat]);
+  freeSharp.push(false); freeHOut.push([0,0]); freeHIn.push([0,0]); freeAuto.push(true);
+  addVertMarker(e.lngLat);
+  penDrag = { i: freeVerts.length - 1, start: e.point };
+  previewFree();
+});
+map.on('mousemove', e => {
+  if (!penDrag) return;
+  if (Math.hypot(e.point.x - penDrag.start.x, e.point.y - penDrag.start.y) > 5) {
+    const a = freeVerts[penDrag.i];
+    const h = [e.lngLat.lng - a[0], e.lngLat.lat - a[1]];
+    freeHOut[penDrag.i] = h;
+    freeHIn[penDrag.i] = [-h[0], -h[1]];
+    freeAuto[penDrag.i] = false;
+    previewFree();
+  }
+});
+map.on('mouseup', () => {
+  if (penDrag) { penDrag = null; map.dragPan.enable(); }
+});
+map.on('dblclick', e => {
+  if (!drawMode || boundaryShape !== 'freeform') return;
+  e.preventDefault(); // suppress double-click zoom
+  if (freeVerts.length >= 3) {
+    setDrawMode(false);
+    commitFree(true);
+    toast('Drag points · double-click = sharp corner · right-click = delete · grab a midpoint to add', 5500);
+  }
+});
+
+// Rect / ellipse: drag a box
+map.on('mousedown', e => {
+  if (!drawMode || boundaryShape === 'freeform') return; // freeform uses clicks, keeps panning
+  e.preventDefault();
+  map.dragPan.disable();
+  drawStart = e.lngLat;
+});
+map.on('mousemove', e => {
+  if (!drawMode || !drawStart) return;
+  const w = Math.min(drawStart.lng, e.lngLat.lng), ee = Math.max(drawStart.lng, e.lngLat.lng);
+  const s = Math.min(drawStart.lat, e.lngLat.lat), n = Math.max(drawStart.lat, e.lngLat.lat);
+  setBoundaryShapes(boundaryRing(w, s, ee, n));
+});
+map.on('mouseup', e => {
+  if (!drawMode || !drawStart) return;
+  const start = drawStart; // setDrawMode nulls it
+  setDrawMode(false);
+  const w = Math.min(start.lng, e.lngLat.lng), ee = Math.max(start.lng, e.lngLat.lng);
+  const s = Math.min(start.lat, e.lngLat.lat), n = Math.max(start.lat, e.lngLat.lat);
+  if (ee - w < 1e-5 || n - s < 1e-5) { restoreBoundary(); return; } // click, not a drag
+  applyBoundary(boundaryRing(w, s, ee, n));
+});
+
+// Canvas-level spline editing. Marker DOM elements don't receive input in some embedded
+// browsers (events all hit the canvas), so editing also works by proximity: any grab within
+// ~14px of a handle counts. The DOM handlers above stay for browsers where they do work —
+// the target.closest guard stops the two paths double-handling one gesture.
+function nearestFreeHandle(pt){
+  if (boundaryShape !== 'freeform' || freeVerts.length < 3) return null;
+  let best = null;
+  // direction-handle dots of the selected anchor take priority
+  freeHandleMarkers.forEach((m, k) => {
+    const p = map.project(m.getLngLat());
+    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+    if (d < 14 && (!best || d < best.d)) best = { type: k === 0 ? 'hin' : 'hout', i: selAnchor, d };
+  });
+  if (!best) freeVerts.forEach((v, i) => {
+    const p = map.project(v);
+    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+    if (d < 14 && (!best || d < best.d)) best = { type: 'vert', i, d };
+  });
+  if (!best) freeMids.forEach((m, i) => {
+    const p = map.project(m.getLngLat());
+    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+    if (d < 12 && (!best || d < best.d)) best = { type: 'mid', i, d };
+  });
+  return best;
+}
+const onMarkerEl = e => e.originalEvent.target.closest && e.originalEvent.target.closest('.vert, .vert-mid, .hdl');
+let handleDrag = null;
+map.on('mousedown', e => {
+  if (drawMode || onMarkerEl(e)) return;
+  const h = nearestFreeHandle(e.point);
+  if (!h) return;
+  e.preventDefault();
+  map.dragPan.disable();
+  if (h.type === 'hin' || h.type === 'hout') { // dragging a direction handle
+    handleDrag = { hdl: h.type === 'hin' ? 'in' : 'out' };
+  } else if (h.type === 'mid') { // grabbing a midpoint inserts a new point there
+    spliceAnchor(h.i + 1, false, [e.lngLat.lng, e.lngLat.lat]);
+    handleDrag = { i: h.i + 1, isNew: true };
+  } else {
+    if (selAnchor !== h.i) { selAnchor = h.i; updateHandleUI(); } // select → show handles
+    handleDrag = { i: h.i, isNew: false };
+  }
+});
+map.on('mousemove', e => {
+  if (!handleDrag) return;
+  if (handleDrag.hdl) {
+    applyHandleDrag(handleDrag.hdl, [e.lngLat.lng, e.lngLat.lat], e.originalEvent.altKey);
+    return;
+  }
+  freeVerts[handleDrag.i] = [e.lngLat.lng, e.lngLat.lat];
+  if (!handleDrag.isNew && freeMarkers[handleDrag.i]) freeMarkers[handleDrag.i].setLngLat(e.lngLat);
+  previewFree();
+  if (selAnchor === handleDrag.i) refreshHandleVisual();
+});
+map.on('mouseup', () => {
+  if (!handleDrag) return;
+  handleDrag = null;
+  map.dragPan.enable();
+  commitFree(false);
+});
+window.addEventListener('mouseup', () => { // released off-canvas — finish the edit anyway
+  if (handleDrag) { handleDrag = null; map.dragPan.enable(); commitFree(false); }
+  if (penDrag) { penDrag = null; map.dragPan.enable(); }
+});
+map.on('click', e => { // click empty space deselects; click a point selects it
+  if (drawMode || boundaryShape !== 'freeform' || freeVerts.length < 3 || onMarkerEl(e)) return;
+  const h = nearestFreeHandle(e.point);
+  if (h && h.type === 'vert') { if (selAnchor !== h.i) { selAnchor = h.i; updateHandleUI(); } }
+  else if (!h && selAnchor !== -1) { selAnchor = -1; updateHandleUI(); }
+});
+map.on('contextmenu', e => { // right-click near a point deletes it
+  if (drawMode || onMarkerEl(e)) return;
+  const h = nearestFreeHandle(e.point);
+  if (!h || h.type !== 'vert') return;
+  e.preventDefault();
+  if (freeVerts.length <= 3) { toast('A boundary needs at least 3 points'); return; }
+  spliceAnchor(h.i, true);
+  commitFree(false);
+});
+map.on('dblclick', e => { // double-click near a point toggles a sharp corner
+  if (drawMode || onMarkerEl(e)) return;
+  const h = nearestFreeHandle(e.point);
+  if (!h || h.type !== 'vert') return;
+  e.preventDefault();
+  freeSharp[h.i] = !freeSharp[h.i];
+  freeAuto[h.i] = true; // un-sharpening regrows auto handles
+  commitFree(false);
+});
+
+// Curve controls re-shape the current freeform boundary immediately.
+// Mid-placement they only refresh the preview — committing would strand draw mode half-active.
+function curveControlChanged(){
+  if (drawMode) { previewFree(); return; }
+  if (boundaryShape === 'freeform' && freeVerts.length >= 3) commitFree(false);
+}
+$('t-curve').addEventListener('change', curveControlChanged);
+$('t-tension').addEventListener('input', e => {
+  $('t-tension-v').textContent = parseFloat(e.target.value).toFixed(2);
+  curveControlChanged();
+});
+
+// ---------- Auto-orbit after idle ----------
+const ORBIT_DEG_PER_SEC = 1.8, IDLE_MS = 5000;
+let orbitRaf = null, idleTimer = null, orbitLastT = 0;
+function orbitStep(t){
+  if (orbitRaf === null) return;
+  map.setBearing(map.getBearing() - (t - orbitLastT) / 1000 * ORBIT_DEG_PER_SEC);
+  orbitLastT = t;
+  orbitRaf = requestAnimationFrame(orbitStep);
+}
+function startOrbit(){
+  // freeform mode is a point-editing state — rotation underneath the cursor would fight it
+  if (!$('t-orbit').checked || drawMode || boundaryShape === 'freeform') return;
+  // pointerHeld: button down but camera still → isMoving() lies; don't orbit under a held press
+  if (map.isMoving() || pointerHeld) { armIdle(); return; }
+  orbitLastT = performance.now();
+  orbitRaf = requestAnimationFrame(orbitStep);
+}
+function stopOrbit(){
+  if (orbitRaf !== null) cancelAnimationFrame(orbitRaf);
+  orbitRaf = null;
+}
+function armIdle(){
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(startOrbit, IDLE_MS);
+}
+let pointerHeld = false;
+for (const ev of ['pointerdown','wheel','keydown','touchstart'])
+  document.addEventListener(ev, () => { stopOrbit(); armIdle(); }, { capture: true, passive: true });
+document.addEventListener('pointerdown', () => { pointerHeld = true; }, { capture: true, passive: true });
+document.addEventListener('pointerup', () => { pointerHeld = false; stopOrbit(); armIdle(); }, { capture: true, passive: true });
+$('t-orbit').addEventListener('change', e => { stopOrbit(); if (e.target.checked) armIdle(); else clearTimeout(idleTimer); });
+armIdle();
+
+// ---------- Ambient birds (flapping chevrons drifting over the map at altitude) ----------
+const birdCanvas = $('birds'), bctx = birdCanvas.getContext('2d');
+function sizeBirdCanvas(){
+  const dpr = window.devicePixelRatio || 1;
+  const w = map.getContainer().clientWidth, h = map.getContainer().clientHeight;
+  birdCanvas.width = w * dpr; birdCanvas.height = h * dpr;
+  birdCanvas.style.width = w + 'px'; birdCanvas.style.height = h + 'px';
+  bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+sizeBirdCanvas();
+map.on('resize', sizeBirdCanvas);
+
+const BIRDS = [];
+function spawnBird(initial, buddy){
+  const w = map.getContainer().clientWidth, h = map.getContainer().clientHeight;
+  if (buddy) { // flock-mate: near the buddy, same course
+    return { ...buddy,
+      lng: buddy.lng + (Math.random()-0.5)*1e-3, lat: buddy.lat + (Math.random()-0.5)*1e-3,
+      alt: buddy.alt + (Math.random()-0.5)*30, phase: Math.random()*Math.PI*2,
+      size: 6.5 + Math.random()*5, offAge: 0 };
+  }
+  let x, y, sa; // screen pos + screen course (radians clockwise from screen-up)
+  if (initial) { x = Math.random()*w; y = Math.random()*h; sa = Math.random()*Math.PI*2; }
+  else { // respawn just outside a random edge, flying inward
+    const side = Math.floor(Math.random()*4);
+    if (side === 0)      { x = -40;  y = Math.random()*h; sa = Math.PI/2; }
+    else if (side === 1) { x = w+40; y = Math.random()*h; sa = -Math.PI/2; }
+    else if (side === 2) { x = Math.random()*w; y = -40;  sa = Math.PI; }
+    else                 { x = Math.random()*w; y = h+40; sa = 0; }
+    sa += (Math.random()-0.5)*0.8;
+  }
+  const ll = map.unproject([x, y]);
+  return {
+    lng: ll.lng, lat: ll.lat,
+    heading: map.getBearing()*Math.PI/180 + sa,
+    speed: 14 + Math.random()*10,   // m/s
+    alt: 90 + Math.random()*90,     // m — fake altitude, projected as a screen offset at pitch
+    size: 6.5 + Math.random()*5,    // px half-wingspan
+    phase: Math.random()*Math.PI*2,
+    flapRate: 7 + Math.random()*4,
+    wander: (Math.random()-0.5)*0.15,
+    offAge: 0,
+  };
+}
+let birdRaf = null, birdLastT = 0;
+function birdStep(t){
+  birdRaf = requestAnimationFrame(birdStep);
+  const dt = Math.min((t - birdLastT)/1000, 0.05);
+  birdLastT = t;
+  const w = map.getContainer().clientWidth, h = map.getContainer().clientHeight;
+  bctx.clearRect(0, 0, w, h);
+  const zoom = map.getZoom();
+  const alpha = Math.min(1, Math.max(0, zoom - 12.5)); // fade in between z12.5 and z13.5
+  if (alpha <= 0) return;
+  const pitch = map.getPitch()*Math.PI/180, bearing = map.getBearing()*Math.PI/180;
+  const mpp = 40075016.686 * Math.cos(map.getCenter().lat*Math.PI/180) / (512 * Math.pow(2, zoom));
+  for (let i = 0; i < BIRDS.length; i++) {
+    const b = BIRDS[i];
+    b.heading += b.wander * dt;
+    if (Math.random() < 0.004) b.wander = (Math.random()-0.5)*0.3;
+    const dm = b.speed * dt;
+    b.lat += dm * Math.cos(b.heading) / 110540;
+    b.lng += dm * Math.sin(b.heading) / (111320 * Math.cos(b.lat*Math.PI/180));
+    b.phase += b.flapRate * dt;
+    const p = map.project([b.lng, b.lat]);
+    const y = p.y - (b.alt / mpp) * Math.sin(pitch); // altitude reads as a vertical screen lift
+    if (p.x < -80 || p.x > w+80 || y < -80 || y > h+80) {
+      b.offAge += dt;
+      if (b.offAge > 2) BIRDS[i] = spawnBird(false);
+      continue;
+    }
+    b.offAge = 0;
+    const flap = Math.sin(b.phase);
+    const wy = flap * b.size * 0.55;
+    bctx.save();
+    bctx.translate(p.x, y);
+    bctx.rotate(b.heading - bearing);
+    bctx.globalAlpha = alpha * 0.8;
+    bctx.strokeStyle = '#1c2126';
+    bctx.lineWidth = 1.6;
+    bctx.lineCap = 'round';
+    bctx.beginPath();
+    bctx.moveTo(-b.size, wy);
+    bctx.quadraticCurveTo(-b.size*0.35, wy*0.2, 0, 0);
+    bctx.quadraticCurveTo(b.size*0.35, wy*0.2, b.size, wy);
+    bctx.stroke();
+    bctx.restore();
+  }
+}
+function setBirds(on){
+  if (on && !birdRaf) {
+    if (!BIRDS.length)
+      for (let i = 0; i < 14; i++)
+        BIRDS.push(spawnBird(true, i % 3 !== 0 ? BIRDS[BIRDS.length-1] : null)); // loose flocks of ~3
+    birdLastT = performance.now();
+    birdRaf = requestAnimationFrame(birdStep);
+  } else if (!on && birdRaf) {
+    cancelAnimationFrame(birdRaf);
+    birdRaf = null;
+    bctx.clearRect(0, 0, birdCanvas.width, birdCanvas.height);
+  }
+}
+$('t-birds').addEventListener('change', e => setBirds(e.target.checked));
+setBirds(true);
+
+// ---------- Export: bake the current setup into a standalone client map ----------
+function serializeConfig(){
+  return {
+    v: 1,
+    camera: { center: [map.getCenter().lng, map.getCenter().lat],
+              zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing() },
+    ring: lastRing,
+    colors: { building: $('c-building').value, water: $('c-water').value,
+              green: $('c-green').value, ground: $('c-ground').value },
+    tod: parseFloat($('t-time').value),
+    terrain: $('t-terrain').checked, exag: parseFloat($('t-exag').value),
+    solid: $('t-solid').checked, taper: $('t-taper').checked,
+    placeLabels: $('t-places').checked, orbit: $('t-orbit').checked,
+    birds: $('t-birds').checked, outline: $('t-outline').checked,
+    pois: { master: $('t-pois').checked, cats: { ...catState } },
+    fonts: Object.fromEntries(Object.keys(FONT_TARGETS).map(k => [k, $(k).value])),
+  };
+}
+$('btn-export').addEventListener('click', async () => {
+  if (!lastRing) { toast('Set a boundary first — the exported map is locked to it'); return; }
+  try {
+    // this page IS the viewer: fetch our own source and bake the config into the placeholder
+    const src = await (await fetch(location.pathname)).text();
+    const html = src.replace('/*__CLIENT_CONFIG__*/', 'window.MAP_CONFIG=' + JSON.stringify(serializeConfig()) + ';');
+    const name = ($('exp-name').value.trim() || 'client-map').toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'client-map';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    a.download = name + '.html';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('Exported — host the file anywhere, link it or iframe it', 4500);
+  } catch (err) { toast('Export failed: ' + err.message); }
+});
+
+// ---------- Viewer mode: an exported client map boots here with MAP_CONFIG baked in ----------
+// Seeding the panel controls is enough — the map 'load' resync applies everything from them.
+const CFG = window.MAP_CONFIG || null;
+if (CFG) {
+  $('panel').style.display = 'none';
+  $('c-building').value = CFG.colors.building; $('c-water').value = CFG.colors.water;
+  $('c-green').value = CFG.colors.green;       $('c-ground').value = CFG.colors.ground;
+  $('t-time').value = CFG.tod;
+  $('t-terrain').checked = CFG.terrain; $('t-exag').value = CFG.exag;
+  $('t-solid').checked = CFG.solid;     $('t-taper').checked = CFG.taper;
+  $('t-places').checked = CFG.placeLabels; $('t-orbit').checked = CFG.orbit;
+  $('t-outline').checked = CFG.outline;
+  $('t-pois').checked = CFG.pois.master;
+  Object.assign(catState, CFG.pois.cats);
+  for (const [selId, font] of Object.entries(CFG.fonts)) $(selId).value = font;
+  lastRing = CFG.ring;
+  lastBounds = ringBBox(CFG.ring);
+  map.jumpTo({ center: CFG.camera.center, zoom: CFG.camera.zoom,
+               pitch: CFG.camera.pitch, bearing: CFG.camera.bearing });
+  if (!CFG.birds) setBirds(false);
+}
+
+// Solid buildings: opaque extrusions stop streets/greens showing through the walls
+function applySolid(){
+  if (!ready()) return;
+  const op = $('t-solid').checked ? 1 : 0.85;
+  map.setPaintProperty('buildings', 'fill-extrusion-opacity', op);
+  map.setPaintProperty('buildings-in', 'fill-extrusion-opacity', op);
+}
+$('t-solid').addEventListener('change', applySolid);
+$('t-taper').addEventListener('change', () => { lastClipCount = -1; refreshBuildingClip(); });
+</script>
+</body>
+</html>
