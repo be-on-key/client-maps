@@ -739,7 +739,7 @@ async function createModelLayerFor(model){
         map.triggerRepaint();
       }, err => toast(`"${model.name}" failed to load: ${(err && err.message) || err}`, 5000));
     },
-    render(gl, matrix){
+    render(gl, options){
       if (!this.model3d) return;
       const alt = (model.onTerrain && ready()) ? (map.queryTerrainElevation([model.lng, model.lat]) || 0) : 0;
       const origin = maplibregl.MercatorCoordinate.fromLngLat([model.lng, model.lat], alt);
@@ -756,7 +756,10 @@ async function createModelLayerFor(model){
         .scale(new THREE.Vector3(s, -s, s))
         .multiply(rotationZ)
         .multiply(rotationX);
-      const m = new THREE.Matrix4().fromArray(matrix).multiply(l);
+      // MapLibre v5 passes an options object here (not a flat matrix, unlike the older
+      // Mapbox-style API this pattern is usually documented with) — modelViewProjectionMatrix
+      // is the pre-combined mercator camera transform we need.
+      const m = new THREE.Matrix4().fromArray(options.modelViewProjectionMatrix).multiply(l);
       this.camera.projectionMatrix = m;
       this.renderer.resetState();
       this.renderer.render(this.scene, this.camera);
