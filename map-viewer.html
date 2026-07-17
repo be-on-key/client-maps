@@ -688,7 +688,8 @@ function renderModelList(){
         <button class="btn model-remove">✕</button></div>
       <div class="row"><label>Scale</label><input type="range" class="model-scale" min="0.1" max="5" step="0.1" value="${model.scale}"><span class="val model-scale-v">${model.scale.toFixed(1)}</span></div>
       <div class="row"><label>Rotation</label><input type="range" class="model-rotation" min="0" max="360" step="1" value="${model.rotationDeg}"><span class="val model-rotation-v">${model.rotationDeg}°</span></div>
-      <div class="row"><label><input type="checkbox" class="model-terrain" ${model.onTerrain ? 'checked' : ''}> Sit on terrain</label></div>`;
+      <div class="row"><label><input type="checkbox" class="model-terrain" ${model.onTerrain ? 'checked' : ''}> Sit on terrain</label></div>
+      <div class="row"><label><input type="checkbox" class="model-zoomscale" ${model.zoomScale ? 'checked' : ''}> Scale with map zoom</label></div>`;
     row.querySelector('.model-remove').addEventListener('click', () => removePlacedModel(model.id));
     row.querySelector('.model-scale').addEventListener('input', e => {
       model.scale = parseFloat(e.target.value);
@@ -702,6 +703,12 @@ function renderModelList(){
     });
     row.querySelector('.model-terrain').addEventListener('change', e => {
       model.onTerrain = e.target.checked; map.triggerRepaint();
+    });
+    row.querySelector('.model-zoomscale').addEventListener('change', e => {
+      model.zoomScale = e.target.checked;
+      // Re-anchor the fixed size to how it looks right now, so unticking never jumps the size
+      if (!model.zoomScale) model.refZoom = map.getZoom();
+      map.triggerRepaint();
     });
     box.appendChild(row);
   }
@@ -748,7 +755,13 @@ async function createModelLayerFor(model){
       // scaled by worldSize (tileSize 512 × 2^zoom) — so both the translation and the
       // metres→mercator geometry scale get the same worldSize factor.
       const worldSize = 512 * Math.pow(2, map.getZoom());
-      const s = origin.meterInMercatorCoordinateUnits() * model.scale * worldSize;
+      // zoomScale on = true real-world size (grows/shrinks with the map). Off (default) = the
+      // model holds a constant on-screen size, matching how pills/markers behave: freeze the
+      // geometry scale at the worldSize of the zoom where it was placed (refZoom) instead of
+      // the live one. Translation always uses the live worldSize so it stays anchored.
+      const scaleWorldSize = model.zoomScale ? worldSize
+        : 512 * Math.pow(2, model.refZoom != null ? model.refZoom : map.getZoom());
+      const s = origin.meterInMercatorCoordinateUnits() * model.scale * scaleWorldSize;
       // Fixed 90° X-rotation converts glTF's Y-up convention to this world space's Z-up
       // (mercator altitude = Z); the Y-scale flip corrects mercator's south-positive Y vs
       // three.js's north/up-positive Y. rotationZ (user-editable) is applied first (innermost),
@@ -779,7 +792,8 @@ async function createModelLayerFor(model){
   }
 }
 function addPlacedModel(draft){
-  const model = { id: 'model-' + (modelSeq++), scale: 1, rotationDeg: 0, onTerrain: true, ...draft };
+  const model = { id: 'model-' + (modelSeq++), scale: 1, rotationDeg: 0, onTerrain: true,
+                  zoomScale: false, refZoom: map.getZoom(), ...draft };
   placedModels.push(model);
   renderModelList();
   if (ready()) createModelLayerFor(model);
@@ -1772,7 +1786,7 @@ setBirds(true);
 // ---------- Export: bake the current setup into a standalone client map ----------
 function serializeConfig(){
   return {
-    v: 5,
+    v: 6,
     camera: { center: [map.getCenter().lng, map.getCenter().lat],
               zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing() },
     ring: lastRing,
@@ -1798,6 +1812,7 @@ function serializeConfig(){
     // self-contained file (no separate asset host), at the cost of file size
     models: placedModels.map(m => ({ name: m.name, lng: m.lng, lat: m.lat,
                                       scale: m.scale, rotationDeg: m.rotationDeg, onTerrain: m.onTerrain,
+                                      zoomScale: m.zoomScale, refZoom: m.refZoom,
                                       dataUrl: m.dataUrl })),
   };
 }
@@ -1853,8 +1868,9 @@ if (CFG) {
     renderCustomPoiCatRows();
   }
   // v1-v4 exports predate 3D models — CFG.models is absent, cfgModels stays empty and the
-  // 'load' handler's materialisation loop is a no-op
-  cfgModels = CFG.models || [];
+  // 'load' handler's materialisation loop is a no-op. v5 predates zoomScale, and its models
+  // always scaled with zoom — default the flag to true so those exports keep looking the same.
+  cfgModels = (CFG.models || []).map(m => ({ zoomScale: true, ...m }));
   lastRing = CFG.ring;
   lastBounds = ringBBox(CFG.ring);
   map.jumpTo({ center: CFG.camera.center, zoom: CFG.camera.zoom,
