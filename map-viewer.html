@@ -736,12 +736,6 @@ async function createModelLayerFor(model){
       loader.parse(buf, '', gltf => {
         this.model3d = gltf.scene;
         this.scene.add(this.model3d);
-        // TEMP DEBUG — remove once rendering is confirmed working
-        const box = new THREE.Box3().setFromObject(this.model3d);
-        console.log('[model-debug] gltf loaded', model.id, {
-          childCount: this.model3d.children.length,
-          boxMin: box.min.toArray(), boxMax: box.max.toArray(), boxEmpty: box.isEmpty(),
-        });
         map.triggerRepaint();
       }, err => toast(`"${model.name}" failed to load: ${(err && err.message) || err}`, 5000));
     },
@@ -749,89 +743,24 @@ async function createModelLayerFor(model){
       if (!this.model3d) return;
       const alt = (model.onTerrain && ready()) ? (map.queryTerrainElevation([model.lng, model.lat]) || 0) : 0;
       const origin = maplibregl.MercatorCoordinate.fromLngLat([model.lng, model.lat], alt);
-      const s = origin.meterInMercatorCoordinateUnits() * model.scale;
-      // Standard MapLibre/Mapbox + three.js custom-layer recipe: fixed 90° X-rotation converts
-      // glTF's Y-up convention to this world space's Z-up (mercator altitude = Z); the Y-scale
-      // flip corrects mercator's south-positive Y vs three.js's north/up-positive Y. rotationZ
-      // (user-editable) is applied first (innermost), so it yaws the model in its own upright
-      // frame rather than tipping it sideways.
+      // MapLibre v5's modelViewProjectionMatrix (unlike the Mapbox-style flat matrix this
+      // pattern is usually documented with) expects world-PIXEL coordinates — mercator [0,1]
+      // scaled by worldSize (tileSize 512 × 2^zoom) — so both the translation and the
+      // metres→mercator geometry scale get the same worldSize factor.
+      const worldSize = 512 * Math.pow(2, map.getZoom());
+      const s = origin.meterInMercatorCoordinateUnits() * model.scale * worldSize;
+      // Fixed 90° X-rotation converts glTF's Y-up convention to this world space's Z-up
+      // (mercator altitude = Z); the Y-scale flip corrects mercator's south-positive Y vs
+      // three.js's north/up-positive Y. rotationZ (user-editable) is applied first (innermost),
+      // so it yaws the model in its own upright frame rather than tipping it sideways.
       const rotationX = new THREE.Matrix4().makeRotationX(Math.PI / 2);
       const rotationZ = new THREE.Matrix4().makeRotationZ(model.rotationDeg * Math.PI / 180);
       const l = new THREE.Matrix4()
-        .makeTranslation(origin.x, origin.y, origin.z)
+        .makeTranslation(origin.x * worldSize, origin.y * worldSize, origin.z * worldSize)
         .scale(new THREE.Vector3(s, -s, s))
         .multiply(rotationZ)
         .multiply(rotationX);
-      // MapLibre v5 passes an options object here (not a flat matrix, unlike the older
-      // Mapbox-style API this pattern is usually documented with) — modelViewProjectionMatrix
-      // is the pre-combined mercator camera transform we need.
-      const mvp = options.modelViewProjectionMatrix;
-      // TEMP DEBUG — remove once rendering is confirmed working
-      this._dbgCount = (this._dbgCount || 0) + 1;
-      if (this._dbgCount <= 3) {
-        console.log('[model-debug] render call #' + this._dbgCount, model.id, {
-          optionsKeys: Object.keys(options),
-          mvpIsArrayLike: !!mvp && typeof mvp.length === 'number',
-          mvpLength: mvp && mvp.length,
-          mvpFirst4: mvp && Array.from(mvp).slice(0, 4),
-          mercatorOrigin: [origin.x, origin.y, origin.z],
-          scaleFactor: s,
-          lngLat: [model.lng, model.lat], alt, rotationDeg: model.rotationDeg,
-          lMatrixElements: l.elements,
-          canvas: [gl.drawingBufferWidth, gl.drawingBufferHeight],
-          viewport: gl.getParameter(gl.VIEWPORT),
-          modelVisible: this.model3d.visible, modelChildren: this.model3d.children.length,
-        });
-      }
-      if (!mvp) { console.log('[model-debug] no modelViewProjectionMatrix on options — full options object:', options); return; }
-      const m = new THREE.Matrix4().fromArray(mvp).multiply(l);
-      if (this._dbgCount <= 3) {
-        console.log('[model-debug] final matrix elements', model.id, m.elements);
-        // Transform the model's own local origin (0,0,0) through the final matrix by hand
-        // (four dot products against a homogeneous [0,0,0,1] point) to see its actual clip-space
-        // position and, after perspective divide, its normalised device coords — this tells us
-        // definitively whether the point lands on-screen ([-1,1] range) or is being clipped away.
-        const e = m.elements; // column-major: e[0..3]=col0, e[4..7]=col1, e[8..11]=col2, e[12..15]=col3
-        const cx = e[12], cy = e[13], cz = e[14], cw = e[15]; // M * (0,0,0,1)
-        console.log('[model-debug] origin clip-space (hypothesis A: absolute mercator coords)', model.id, { cx, cy, cz, cw,
-          ndc: cw !== 0 ? { x: cx/cw, y: cy/cw, z: cz/cw } : 'w=0 (degenerate)',
-          onScreen: cw !== 0 && Math.abs(cx/cw) <= 1 && Math.abs(cy/cw) <= 1 && cw > 0 });
-        // Hypothesis B: this matrix expects coordinates relative to the map's current centre
-        // (a common technique to preserve float32 precision at high zoom, where absolute mercator
-        // coordinates like 0.90270303... lose the sub-metre-scale tail that float32 can't hold,
-        // but a small centre-relative delta stays fully precise) — test it the same way.
-        const centerM = maplibregl.MercatorCoordinate.fromLngLat(map.getCenter(), 0);
-        const l2 = new THREE.Matrix4()
-          .makeTranslation(origin.x - centerM.x, origin.y - centerM.y, origin.z - centerM.z)
-          .scale(new THREE.Vector3(s, -s, s))
-          .multiply(rotationZ)
-          .multiply(rotationX);
-        const m2 = new THREE.Matrix4().fromArray(mvp).multiply(l2);
-        const e2 = m2.elements;
-        const cx2 = e2[12], cy2 = e2[13], cz2 = e2[14], cw2 = e2[15];
-        console.log('[model-debug] origin clip-space (hypothesis B: centre-relative coords)', model.id, { cx: cx2, cy: cy2, cz: cz2, cw: cw2,
-          ndc: cw2 !== 0 ? { x: cx2/cw2, y: cy2/cw2, z: cz2/cw2 } : 'w=0 (degenerate)',
-          onScreen: cw2 !== 0 && Math.abs(cx2/cw2) <= 1 && Math.abs(cy2/cw2) <= 1 && cw2 > 0 });
-        // Hypothesis C: A and B landed almost identically off-screen despite very different
-        // translation magnitudes (0.9 vs a tiny centre-relative delta) — meaning the huge offset
-        // isn't coming from the translation's absolute size at all, it's a scale mismatch. Maybe
-        // this matrix expects MapLibre's internal "world pixel" units (mercator [0,1] * worldSize,
-        // worldSize = tileSize * 2^zoom) rather than raw [0,1] — the same convention tile/EXTENT
-        // math uses internally. Scale the model's own geometry scale factor by the same worldSize
-        // so translation and geometry stay on a consistent unit system.
-        const worldSize = 512 * Math.pow(2, map.getZoom());
-        const l3 = new THREE.Matrix4()
-          .makeTranslation(origin.x * worldSize, origin.y * worldSize, origin.z * worldSize)
-          .scale(new THREE.Vector3(s * worldSize, -s * worldSize, s * worldSize))
-          .multiply(rotationZ)
-          .multiply(rotationX);
-        const m3 = new THREE.Matrix4().fromArray(mvp).multiply(l3);
-        const e3 = m3.elements;
-        const cx3 = e3[12], cy3 = e3[13], cz3 = e3[14], cw3 = e3[15];
-        console.log('[model-debug] origin clip-space (hypothesis C: world-pixel-unit coords, worldSize=' + worldSize + ')', model.id, { cx: cx3, cy: cy3, cz: cz3, cw: cw3,
-          ndc: cw3 !== 0 ? { x: cx3/cw3, y: cy3/cw3, z: cz3/cw3 } : 'w=0 (degenerate)',
-          onScreen: cw3 !== 0 && Math.abs(cx3/cw3) <= 1 && Math.abs(cy3/cw3) <= 1 && cw3 > 0 });
-      }
+      const m = new THREE.Matrix4().fromArray(options.modelViewProjectionMatrix).multiply(l);
       this.camera.projectionMatrix = m;
       this.renderer.resetState();
       this.renderer.render(this.scene, this.camera);
