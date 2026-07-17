@@ -736,6 +736,12 @@ async function createModelLayerFor(model){
       loader.parse(buf, '', gltf => {
         this.model3d = gltf.scene;
         this.scene.add(this.model3d);
+        // TEMP DEBUG — remove once rendering is confirmed working
+        const box = new THREE.Box3().setFromObject(this.model3d);
+        console.log('[model-debug] gltf loaded', model.id, {
+          childCount: this.model3d.children.length,
+          boxMin: box.min.toArray(), boxMax: box.max.toArray(), boxEmpty: box.isEmpty(),
+        });
         map.triggerRepaint();
       }, err => toast(`"${model.name}" failed to load: ${(err && err.message) || err}`, 5000));
     },
@@ -759,7 +765,27 @@ async function createModelLayerFor(model){
       // MapLibre v5 passes an options object here (not a flat matrix, unlike the older
       // Mapbox-style API this pattern is usually documented with) — modelViewProjectionMatrix
       // is the pre-combined mercator camera transform we need.
-      const m = new THREE.Matrix4().fromArray(options.modelViewProjectionMatrix).multiply(l);
+      const mvp = options.modelViewProjectionMatrix;
+      // TEMP DEBUG — remove once rendering is confirmed working
+      this._dbgCount = (this._dbgCount || 0) + 1;
+      if (this._dbgCount <= 3) {
+        console.log('[model-debug] render call #' + this._dbgCount, model.id, {
+          optionsKeys: Object.keys(options),
+          mvpIsArrayLike: !!mvp && typeof mvp.length === 'number',
+          mvpLength: mvp && mvp.length,
+          mvpFirst4: mvp && Array.from(mvp).slice(0, 4),
+          mercatorOrigin: [origin.x, origin.y, origin.z],
+          scaleFactor: s,
+          lngLat: [model.lng, model.lat], alt, rotationDeg: model.rotationDeg,
+          lMatrixElements: l.elements,
+          canvas: [gl.drawingBufferWidth, gl.drawingBufferHeight],
+          viewport: gl.getParameter(gl.VIEWPORT),
+          modelVisible: this.model3d.visible, modelChildren: this.model3d.children.length,
+        });
+      }
+      if (!mvp) { console.log('[model-debug] no modelViewProjectionMatrix on options — full options object:', options); return; }
+      const m = new THREE.Matrix4().fromArray(mvp).multiply(l);
+      if (this._dbgCount <= 3) console.log('[model-debug] final matrix elements', model.id, m.elements);
       this.camera.projectionMatrix = m;
       this.renderer.resetState();
       this.renderer.render(this.scene, this.camera);
