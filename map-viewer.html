@@ -812,6 +812,25 @@ async function createModelLayerFor(model){
         console.log('[model-debug] origin clip-space (hypothesis B: centre-relative coords)', model.id, { cx: cx2, cy: cy2, cz: cz2, cw: cw2,
           ndc: cw2 !== 0 ? { x: cx2/cw2, y: cy2/cw2, z: cz2/cw2 } : 'w=0 (degenerate)',
           onScreen: cw2 !== 0 && Math.abs(cx2/cw2) <= 1 && Math.abs(cy2/cw2) <= 1 && cw2 > 0 });
+        // Hypothesis C: A and B landed almost identically off-screen despite very different
+        // translation magnitudes (0.9 vs a tiny centre-relative delta) — meaning the huge offset
+        // isn't coming from the translation's absolute size at all, it's a scale mismatch. Maybe
+        // this matrix expects MapLibre's internal "world pixel" units (mercator [0,1] * worldSize,
+        // worldSize = tileSize * 2^zoom) rather than raw [0,1] — the same convention tile/EXTENT
+        // math uses internally. Scale the model's own geometry scale factor by the same worldSize
+        // so translation and geometry stay on a consistent unit system.
+        const worldSize = 512 * Math.pow(2, map.getZoom());
+        const l3 = new THREE.Matrix4()
+          .makeTranslation(origin.x * worldSize, origin.y * worldSize, origin.z * worldSize)
+          .scale(new THREE.Vector3(s * worldSize, -s * worldSize, s * worldSize))
+          .multiply(rotationZ)
+          .multiply(rotationX);
+        const m3 = new THREE.Matrix4().fromArray(mvp).multiply(l3);
+        const e3 = m3.elements;
+        const cx3 = e3[12], cy3 = e3[13], cz3 = e3[14], cw3 = e3[15];
+        console.log('[model-debug] origin clip-space (hypothesis C: world-pixel-unit coords, worldSize=' + worldSize + ')', model.id, { cx: cx3, cy: cy3, cz: cz3, cw: cw3,
+          ndc: cw3 !== 0 ? { x: cx3/cw3, y: cy3/cw3, z: cz3/cw3 } : 'w=0 (degenerate)',
+          onScreen: cw3 !== 0 && Math.abs(cx3/cw3) <= 1 && Math.abs(cy3/cw3) <= 1 && cw3 > 0 });
       }
       this.camera.projectionMatrix = m;
       this.renderer.resetState();
