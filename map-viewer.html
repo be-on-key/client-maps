@@ -106,6 +106,9 @@
   <div class="section">
     <div class="title"><label style="text-transform:none;font-size:12px;color:#cfd3da"><input type="checkbox" id="t-pois" checked> <b style="color:#fff">Points of interest</b></label></div>
     <div id="poi-cats"></div>
+    <div class="row"><label>Pill radius</label><input type="range" id="t-pill-radius" min="0" max="20" step="1" value="16"><span class="val" id="t-pill-radius-v">16</span></div>
+    <div class="row"><label>Pill padding V</label><input type="range" id="t-pill-pad-v" min="0" max="16" step="1" value="6"><span class="val" id="t-pill-pad-v-v">6</span></div>
+    <div class="row"><label>Pill padding H</label><input type="range" id="t-pill-pad-h" min="0" max="24" step="1" value="10"><span class="val" id="t-pill-pad-h-v">10</span></div>
   </div>
 
   <div class="section">
@@ -279,8 +282,9 @@ const ready = () => styleReady;
 // SDF pill base image for poi-labels' icon-image: a rounded-rect, white on transparent, drawn once
 // on an offscreen canvas. SDF lets icon-color recolour it per-feature at render time (icon-text-fit
 // then stretches it to each label's rendered text bbox) — one shared image, no per-category variants.
-function addPoiPillImage(){
-  const w = 64, h = 40, r = 16, pr = 3;
+function addPoiPillImage(r = parseFloat($('t-pill-radius').value)){
+  const w = 64, h = 40, pr = 3;
+  r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
   const c = document.createElement('canvas');
   c.width = w * pr; c.height = h * pr;
   const ctx = c.getContext('2d');
@@ -294,10 +298,16 @@ function addPoiPillImage(){
   map.addImage('poi-pill', { width: c.width, height: c.height, data: ctx.getImageData(0, 0, c.width, c.height).data },
     { sdf: true, pixelRatio: pr });
 }
+function applyPillPadding(){
+  if (!ready()) return;
+  const v = parseFloat($('t-pill-pad-v').value), h = parseFloat($('t-pill-pad-h').value);
+  map.setLayoutProperty('poi-labels', 'icon-text-fit-padding', [v, h, v, h]);
+}
 
 map.on('load', () => {
   styleReady = true;
   addPoiPillImage();
+  applyPillPadding();
   // Re-sync everything the panel could have changed while the style was still loading
   applyTimeOfDay(parseFloat($('t-time').value));
   applyPoiFilter();
@@ -361,6 +371,18 @@ $('t-pois').addEventListener('change', e => {
 });
 $('t-places').addEventListener('change', e => {
   if (ready()) map.setLayoutProperty('place-labels', 'visibility', e.target.checked ? 'visible' : 'none');
+});
+$('t-pill-radius').addEventListener('input', e => {
+  $('t-pill-radius-v').textContent = e.target.value;
+  if (ready()) addPoiPillImage(parseFloat(e.target.value));
+});
+$('t-pill-pad-v').addEventListener('input', e => {
+  $('t-pill-pad-v-v').textContent = e.target.value;
+  applyPillPadding();
+});
+$('t-pill-pad-h').addEventListener('input', e => {
+  $('t-pill-pad-h-v').textContent = e.target.value;
+  applyPillPadding();
 });
 
 // ---------- Label fonts (stacks verified live on fonts.openmaptiles.org) ----------
@@ -1311,7 +1333,7 @@ setBirds(true);
 // ---------- Export: bake the current setup into a standalone client map ----------
 function serializeConfig(){
   return {
-    v: 2,
+    v: 3,
     camera: { center: [map.getCenter().lng, map.getCenter().lat],
               zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing() },
     ring: lastRing,
@@ -1325,6 +1347,8 @@ function serializeConfig(){
     pois: { master: $('t-pois').checked, cats: { ...catState },
             colors: Object.fromEntries(Object.entries(POI_CATS).map(([k, v]) => [k, v.color])) },
     fonts: Object.fromEntries(Object.keys(FONT_TARGETS).map(k => [k, $(k).value])),
+    pillStyle: { radius: parseFloat($('t-pill-radius').value),
+                 padV: parseFloat($('t-pill-pad-v').value), padH: parseFloat($('t-pill-pad-h').value) },
   };
 }
 $('btn-export').addEventListener('click', async () => {
@@ -1361,6 +1385,13 @@ if (CFG) {
   // its built-in defaults, which is exactly v1's original (only) behaviour
   if (CFG.pois.colors) for (const [k, c] of Object.entries(CFG.pois.colors)) POI_CATS[k].color = c;
   for (const [selId, font] of Object.entries(CFG.fonts)) $(selId).value = font;
+  // v1/v2 exports predate pill styling controls — inputs keep their HTML defaults (16/6/10),
+  // which match this feature's original hardcoded values, so old exports render unchanged
+  if (CFG.pillStyle) {
+    $('t-pill-radius').value = CFG.pillStyle.radius;
+    $('t-pill-pad-v').value = CFG.pillStyle.padV;
+    $('t-pill-pad-h').value = CFG.pillStyle.padH;
+  }
   lastRing = CFG.ring;
   lastBounds = ringBBox(CFG.ring);
   map.jumpTo({ center: CFG.camera.center, zoom: CFG.camera.zoom,
