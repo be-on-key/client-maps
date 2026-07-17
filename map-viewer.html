@@ -785,7 +785,18 @@ async function createModelLayerFor(model){
       }
       if (!mvp) { console.log('[model-debug] no modelViewProjectionMatrix on options — full options object:', options); return; }
       const m = new THREE.Matrix4().fromArray(mvp).multiply(l);
-      if (this._dbgCount <= 3) console.log('[model-debug] final matrix elements', model.id, m.elements);
+      if (this._dbgCount <= 3) {
+        console.log('[model-debug] final matrix elements', model.id, m.elements);
+        // Transform the model's own local origin (0,0,0) through the final matrix by hand
+        // (four dot products against a homogeneous [0,0,0,1] point) to see its actual clip-space
+        // position and, after perspective divide, its normalised device coords — this tells us
+        // definitively whether the point lands on-screen ([-1,1] range) or is being clipped away.
+        const e = m.elements; // column-major: e[0..3]=col0, e[4..7]=col1, e[8..11]=col2, e[12..15]=col3
+        const cx = e[12], cy = e[13], cz = e[14], cw = e[15]; // M * (0,0,0,1)
+        console.log('[model-debug] origin clip-space', model.id, { cx, cy, cz, cw,
+          ndc: cw !== 0 ? { x: cx/cw, y: cy/cw, z: cz/cw } : 'w=0 (degenerate)',
+          onScreen: cw !== 0 && Math.abs(cx/cw) <= 1 && Math.abs(cy/cw) <= 1 && cw > 0 });
+      }
       this.camera.projectionMatrix = m;
       this.renderer.resetState();
       this.renderer.render(this.scene, this.camera);
