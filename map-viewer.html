@@ -793,9 +793,25 @@ async function createModelLayerFor(model){
         // definitively whether the point lands on-screen ([-1,1] range) or is being clipped away.
         const e = m.elements; // column-major: e[0..3]=col0, e[4..7]=col1, e[8..11]=col2, e[12..15]=col3
         const cx = e[12], cy = e[13], cz = e[14], cw = e[15]; // M * (0,0,0,1)
-        console.log('[model-debug] origin clip-space', model.id, { cx, cy, cz, cw,
+        console.log('[model-debug] origin clip-space (hypothesis A: absolute mercator coords)', model.id, { cx, cy, cz, cw,
           ndc: cw !== 0 ? { x: cx/cw, y: cy/cw, z: cz/cw } : 'w=0 (degenerate)',
           onScreen: cw !== 0 && Math.abs(cx/cw) <= 1 && Math.abs(cy/cw) <= 1 && cw > 0 });
+        // Hypothesis B: this matrix expects coordinates relative to the map's current centre
+        // (a common technique to preserve float32 precision at high zoom, where absolute mercator
+        // coordinates like 0.90270303... lose the sub-metre-scale tail that float32 can't hold,
+        // but a small centre-relative delta stays fully precise) — test it the same way.
+        const centerM = maplibregl.MercatorCoordinate.fromLngLat(map.getCenter(), 0);
+        const l2 = new THREE.Matrix4()
+          .makeTranslation(origin.x - centerM.x, origin.y - centerM.y, origin.z - centerM.z)
+          .scale(new THREE.Vector3(s, -s, s))
+          .multiply(rotationZ)
+          .multiply(rotationX);
+        const m2 = new THREE.Matrix4().fromArray(mvp).multiply(l2);
+        const e2 = m2.elements;
+        const cx2 = e2[12], cy2 = e2[13], cz2 = e2[14], cw2 = e2[15];
+        console.log('[model-debug] origin clip-space (hypothesis B: centre-relative coords)', model.id, { cx: cx2, cy: cy2, cz: cz2, cw: cw2,
+          ndc: cw2 !== 0 ? { x: cx2/cw2, y: cy2/cw2, z: cz2/cw2 } : 'w=0 (degenerate)',
+          onScreen: cw2 !== 0 && Math.abs(cx2/cw2) <= 1 && Math.abs(cy2/cw2) <= 1 && cw2 > 0 });
       }
       this.camera.projectionMatrix = m;
       this.renderer.resetState();
